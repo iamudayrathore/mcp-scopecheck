@@ -1,0 +1,23 @@
+MCP ScopeCheck
+==============
+Target: <TARGET>
+Mode: static source analysis (target code was not imported or executed)
+
+5-S summary
+  Source:       1 Python file(s) read
+  Surface:      1 MCP tool(s) discovered
+  Scope:        1 declared parameter(s)
+  Side effects: 2 reachable capability site(s)
+  Snapshot:     sha256:8fd69552ce3407ba3774eb5ad7cb4a613db3e5892413ee03d02a897ec51bd715
+
+Tools
+  search_project_docs (server.py:21)
+    Description: Search bundled project documentation within the server's fixed documentation root.
+    Parameters:  query
+    Claims:      readOnlyHint=true
+    Observed:    filesystem_read
+
+Findings (0)
+  No contract mismatches or high-risk behavior detected by the v0.1 rules.
+
+Limit: a clean static scan is not proof of safe runtime behavior.

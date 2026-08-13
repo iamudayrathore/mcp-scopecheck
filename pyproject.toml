@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools==84.0.0", "wheel==0.48.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-scopecheck"
+version = "0.1.0"
+description = "Static claim-versus-capability analysis for Python MCP servers"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "Uday Rathore"}]
+keywords = ["mcp", "security", "static-analysis", "ai-agents", "appsec"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+]
+dependencies = []
+
+[project.scripts]
+mcp-scopecheck = "mcp_scopecheck.cli:main"
+
+[project.urls]
+Issues = "https://github.com/thellmarchitect/mcp-scopecheck/issues"
+Repository = "https://github.com/thellmarchitect/mcp-scopecheck"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["B", "C4", "E", "F", "I", "UP", "W"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["mcp_scopecheck"]
+mypy_path = "src"

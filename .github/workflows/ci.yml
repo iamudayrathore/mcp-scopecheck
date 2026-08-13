@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run standard-library tests
+        run: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest discover -s tests -v
+
+      - name: Compile source
+        run: PYTHONPYCACHEPREFIX="${RUNNER_TEMP}/scopecheck-pycache" python -m compileall -q src tests examples
+
+      - name: Verify unsafe and hardened fixtures
+        shell: bash
+        run: |
+          set +e
+          PYTHONPATH=src python -m mcp_scopecheck audit examples/unsafe_docs_server
+          unsafe_exit=$?
+          set -e
+          test "${unsafe_exit}" -eq 1
+          PYTHONPATH=src python -m mcp_scopecheck audit examples/hardened_docs_server
+
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Install pinned development tools
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+
+      - name: Run Ruff
+        run: python -m ruff check .
+
+      - name: Run strict mypy
+        run: python -m mypy
+
+      - name: Build wheel and source distribution
+        run: python -m build --no-isolation --outdir dist
