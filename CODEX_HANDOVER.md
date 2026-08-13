@@ -1,6 +1,6 @@
 # MCP ScopeCheck — full Codex build handover
 
-Last reconciled: 2026-08-10
+Last reconciled: 2026-08-12
 
 ## 1. Mission
 
@@ -19,7 +19,7 @@ This repository is meant to be production-code evidence, not a throwaway demo. A
 - A clean standalone implementation now exists here under the provisional name `mcp-scopecheck`.
 - The current CLI is functional. It is not the old stub described in the historical handoff.
 - The clean implementation was rebuilt as a zero-runtime-dependency Python package. It is not a copy of the broad legacy application.
-- v0.1 has been locally validated, but it has not passed every public-release gate and has not been published.
+- Every locally executable v0.1 gate through R5 has passed. Owner approval, an owner-approved remote, public CI, security-contact configuration, tagging, and publication remain; nothing has been published.
 
 The uploaded legacy archive contained an environment file, a full virtual environment, caches, macOS metadata, and a nested archive. Treat that archive as reference-only and potentially sensitive. Do not put it inside this repository, inspect its environment values, reuse its Git history, or copy its dependency set.
 
@@ -71,11 +71,11 @@ v0.1 discovers module-level `.tool` decorators and follows direct named helper c
 | 5-S terminal renderer | Implemented | `src/mcp_scopecheck/render.py` |
 | `mcp-scopecheck audit` CLI | Implemented | `src/mcp_scopecheck/cli.py` |
 | Unsafe and hardened demo pair | Implemented | `examples/` |
-| End-to-end regression suite | 10 tests passing locally | `tests/test_audit.py` |
+| End-to-end regression suite | 22 tests passing locally | `tests/` |
 | Package metadata and console script | Implemented | `pyproject.toml` |
-| Threat model and release docs | Implemented; release gates remain | `docs/architecture.md`, `RELEASE.md` |
-| CI | Implemented for Python 3.11–3.13 tests/build/fixtures | `.github/workflows/ci.yml` |
-| Gitleaks | Fail-closed local script exists; real run still required | `scripts/preflight.sh` |
+| Threat model and release docs | Implemented; only owner/external gates remain | `docs/architecture.md`, `RELEASE.md` |
+| CI | Implemented for Python 3.11–3.13 tests/fixtures plus pinned quality/build gates | `.github/workflows/ci.yml` |
+| Gitleaks | Fail-closed preflight passes with Gitleaks 8.30.1 | `scripts/preflight.sh` |
 
 ## 5. v0.1 rule inventory
 
@@ -103,18 +103,18 @@ Important: `MSC001` is regex-based deterministic analysis in v0.1. It is not an 
 
 ## 7. Verified evidence as of handover
 
-The local validation record is `docs/validation-2026-08-10.md`. It records:
+The current local validation records are `docs/validation-2026-08-12.md` and `docs/validation-final-2026-08-12.md`. They record:
 
-- 10/10 standard-library tests passed.
+- 22/22 standard-library tests passed.
 - Source, tests, and examples compiled.
-- A wheel built and installed in a fresh virtual environment.
-- `pip check` passed in that environment.
-- Packaged unsafe fixture exited `1` and included `MSC105`.
-- Packaged hardened fixture exited `0` with zero findings.
+- Ruff 0.16.2 and strict mypy 2.3.0 passed.
+- Gitleaks 8.30.1 passed on clean candidate checkouts.
+- Wheel and sdist built, were reviewed, and installed separately without runtime dependencies.
+- `pip check`, version/help, paired fixtures, and threshold behavior passed in both installed environments.
 - The target non-execution regression passed.
 - Conservative local secret-shaped checks found no environment file, private key, common live credential prefix, or legacy-project branding in the clean tree.
 
-This evidence does **not** mean Gitleaks, Ruff, mypy, clean-checkout CI, or public name availability passed. Those remain release gates.
+This evidence does **not** mean public CI, name reservation, security-contact configuration, or publication passed. Those require the owner-approved external steps in R6.
 
 ## 8. Known technical limitations and likely false-result areas
 

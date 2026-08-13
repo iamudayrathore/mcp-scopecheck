@@ -1,6 +1,6 @@
 # MCP ScopeCheck execution plan
 
-Last updated: 2026-08-10
+Last updated: 2026-08-12
 
 ## Objective and stopping condition
 
@@ -16,12 +16,12 @@ Work one checkpoint at a time. Do not begin v0.2 work while a v0.1 gate is open.
 
 | Checkpoint | Outcome | State at handover |
 | --- | --- | --- |
-| R0 | Reconcile baseline and owner gates | Reproduced in handover workspace; rerun in release workspace |
-| R1 | Make quality checks reproducible | Pending |
-| R2 | Close correctness and packaging gaps | Pending |
-| R3 | Prove clean install and release candidate | Pending |
-| R4 | Finish public documentation and demo | Pending |
-| R5 | Fresh repository preflight | Pending |
+| R0 | Reconcile baseline and owner gates | Complete |
+| R1 | Make quality checks reproducible | Complete |
+| R2 | Close correctness and packaging gaps | Complete |
+| R3 | Prove clean install and release candidate | Complete |
+| R4 | Finish public documentation and demo | Complete |
+| R5 | Fresh repository preflight | Complete locally; public CI awaits owner-approved remote |
 | R6 | Owner-approved publication | Blocked on owner approval |
 | P1+ | Post-release product roadmap | Deferred |
 

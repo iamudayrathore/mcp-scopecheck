@@ -4,24 +4,23 @@ Last updated: 2026-08-12
 
 ## Current state
 
-MCP ScopeCheck has a functional standalone v0.1 vertical slice. R0 through R4 are complete: baseline, quality, correctness, packaging, clean-history/install, public-documentation, and reproducible-demo proofs are recorded, and the implementation preserves the static no-target-execution boundary. It has not been publicly released.
+MCP ScopeCheck v0.1.0 has completed every locally executable release gate through R5. The clean standalone history, exact rule/output tests, pinned quality gates, Gitleaks, reviewed distributions, separate clean installs, public documentation, and real terminal demo are validated. It has not been publicly released.
 
 ## Evidence on record
 
-See `docs/validation-2026-08-10.md` for the exact previously completed validation and artifact hash.
+See `docs/validation-final-2026-08-12.md` for the final local evidence. Exact final artifact hashes are supplied in the owner handoff; earlier evidence remains in `docs/validation-2026-08-10.md` and `docs/validation-2026-08-12.md`.
 
 ## Open release blockers
 
 - Owner approval of the final public name and repository destination.
 - Owner approval and final availability/reservation check for GitHub, PyPI package, and CLI names immediately before reservation. A provisional read-only check passed on 2026-08-12.
-- Full pinned preflight, including Gitleaks, on the exact clean release candidate.
-- Full release checklist and validation from a clean clone of the exact final candidate.
-- Public CI on the exact candidate, if the owner authorizes a private or public remote before publication.
+- Owner approval of author/owner presentation and a durable private security-reporting channel.
+- Public CI on Python 3.11–3.13 after the owner authorizes a remote push.
 - Owner approval for remote creation, push, tag, PyPI publication, and launch.
 
 ## Next checkpoint
 
-R5 in `PLANS.md`: review the complete tree and diff, recheck name availability and metadata, verify action pins, run the full checklist from a clean clone of the exact candidate, and prepare the final owner handoff without performing external publication.
+Owner gate for R6: approve the final name, repository destination, author/owner presentation, security-reporting setup, exact diff, and proposed publication sequence. Recommended defaults remain O001-O003 in `docs/decisions.md`; enable GitHub private vulnerability reporting when the repository is created. No external action should occur before that approval.
 
 ## Codex progress log
 
@@ -101,3 +100,14 @@ Append entries using this format:
 - Skipped/blocked: launch copy remains explicitly unposted. GitHub private vulnerability reporting cannot be enabled until the owner authorizes repository creation; `SECURITY.md` now gives a non-public fallback without claiming that external configuration already exists.
 - Decision: no durable product or architecture decision changed.
 - Next: complete R5 final fresh-repository preflight and owner handoff.
+
+### 2026-08-12 — R5 final local preflight complete
+
+- Changed: completed every local checkbox in `RELEASE.md`, reconciled `PLANS.md` and `CODEX_HANDOVER.md` with the current 22-test/release-gate reality, and added `docs/validation-final-2026-08-12.md`. No production or public payload behavior changed during the closure step.
+- Verified: a clean no-hardlink clone of payload commit `38f286f3d1fd16d878e5c44a07c7674625e270f7` passed `scripts/preflight.sh`: Gitleaks 8.30.1 scanned approximately 150.22 KB with no leaks; 22/22 tests, compile, Ruff 0.16.2, strict mypy 2.3.0, wheel build, and sdist build passed.
+- Verified: wheel/sdist builds, manual content listings, separate offline installs, both `pip check` runs, version/help, unsafe exit `1`, hardened exit `0`, high-threshold exit `1`, and critical-threshold exit `0` all passed. The fixed-epoch wheel compared byte-for-byte across the payload and closure commits; extracted sdist content was identical, while setuptools-generated tar timestamps differed and are not claimed to be reproducible.
+- Verified: final read-only name checks returned `404` for the PyPI project and proposed GitHub destination, with zero GitHub repository-name search results. The proposed owner account exists. Official GitHub tag-ref and commit APIs proved both Actions comments and full SHA pins match `actions/checkout@v4.4.0` and `actions/setup-python@v6.3.0`.
+- Verified: the complete tracked tree and standalone history were reviewed. No environment file, private key, credential-shaped token, symlink, generated cache, build output, unrelated application module, or transplanted legacy history was found. The only legacy package-name reference is the intentional collision/positioning record.
+- Skipped/blocked: Python 3.11 and 3.12 are not locally installed; public matrix execution requires an owner-approved remote. Name reservation, security-setting configuration, remote creation/push, tag, GitHub/PyPI publication, and launch remain owner/external gates and were not performed.
+- Decision: no new product/dependency/security-boundary decision was required. Recommended owner default: approve O001-O003, keep O004 excluded, enable GitHub private vulnerability reporting, then publish the exact reviewed candidate only after public CI passes.
+- Next: owner approval for R6 external actions.
