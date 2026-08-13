@@ -49,6 +49,8 @@ A hiring reviewer should be able to scan in this order:
 6. Pin a concise call to action: run it on a local Python MCP server, open issues with minimal fixtures, and treat clean output as a starting point rather than proof of safety.
 7. Collect concrete false-positive/false-negative examples for the evaluation corpus.
 
+Prepared copy is in `docs/launch-copy-v0.1.0.md`; release notes are in `docs/release-notes-v0.1.0.md`. Both remain drafts until owner approval and must be checked against the exact final candidate before publication.
+
 ## Interview narrative
 
 Keep the story technical and verifiable:

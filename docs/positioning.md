@@ -1,6 +1,6 @@
 # Product positioning and claim discipline
 
-Last reviewed: 2026-08-10
+Last reviewed: 2026-08-12
 
 ## Category
 

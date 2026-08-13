@@ -4,7 +4,7 @@ Last updated: 2026-08-12
 
 ## Current state
 
-MCP ScopeCheck has a functional standalone v0.1 vertical slice. R0 through R2 are complete in the owner's release workspace: the baseline and reproducible quality gates are reconciled, focused correctness gaps are closed, package-content intent is explicit, and the implementation preserves the static no-target-execution boundary. It has not been publicly released.
+MCP ScopeCheck has a functional standalone v0.1 vertical slice. R0 through R4 are complete: baseline, quality, correctness, packaging, clean-history/install, public-documentation, and reproducible-demo proofs are recorded, and the implementation preserves the static no-target-execution boundary. It has not been publicly released.
 
 ## Evidence on record
 
@@ -15,14 +15,13 @@ See `docs/validation-2026-08-10.md` for the exact previously completed validatio
 - Owner approval of the final public name and repository destination.
 - Owner approval and final availability/reservation check for GitHub, PyPI package, and CLI names immediately before reservation. A provisional read-only check passed on 2026-08-12.
 - Full pinned preflight, including Gitleaks, on the exact clean release candidate.
-- Clean wheel/source-distribution installs and installed fixture verification.
-- Full workflow from a fresh standalone Git checkout.
-- Final public documentation/demo review.
+- Full release checklist and validation from a clean clone of the exact final candidate.
+- Public CI on the exact candidate, if the owner authorizes a private or public remote before publication.
 - Owner approval for remote creation, push, tag, PyPI publication, and launch.
 
 ## Next checkpoint
 
-R3 in `PLANS.md`: create the fresh standalone local Git history, reproduce the full candidate gates from a clean checkout, install wheel and sdist separately, verify installed behavior, and record artifact contents and checksums.
+R5 in `PLANS.md`: review the complete tree and diff, recheck name availability and metadata, verify action pins, run the full checklist from a clean clone of the exact candidate, and prepare the final owner handoff without performing external publication.
 
 ## Codex progress log
 
@@ -80,3 +79,25 @@ Append entries using this format:
 - Skipped/blocked: clean installation and installed-command checks intentionally remain R3 work. The current directory still has no Git history, so current Gitleaks evidence is for the tree rather than an exact release commit.
 - Decision: D010 records the narrowed deterministic `MSC103` and `MSC105` semantics; no production dependency or security-boundary expansion was introduced.
 - Next: complete R3 clean build and install proof.
+
+### 2026-08-12 — R3 clean build and install proof complete
+
+- Changed: initialized a fresh standalone local Git repository on `main` and created root commit `fad953b7818ef2ddf07c67fb49fc95f9eb7f9915` using the owner's existing local Git identity; added `docs/validation-2026-08-12.md` with the clean-checkout, archive, install, behavior, and checksum evidence. No remote was created or contacted, and no tag or publication action occurred.
+- Verified: a separate `git clone --no-hardlinks` checkout began clean at `fad953b`; a fresh Python 3.13.7 environment installed `requirements-dev.txt`; with that environment activated, `scripts/preflight.sh` exited `0`. Gitleaks 8.30.1 scanned approximately 136.17 KB and found no leaks; 22/22 tests, compile, Ruff 0.16.2, strict mypy 2.3.0, wheel build, and sdist build passed.
+- Verified: manually reviewed `tar -tzf` and `unzip -l` listings for the exact artifacts. The wheel contains only the eight package modules, MIT license, and standard metadata. The sdist contains the positive-listed public source, docs, fixtures, tests/expected reports, and release tooling; internal handover/status/decision/release-control files and build debris are absent.
+- Verified: the wheel and sdist installed separately and offline into fresh Python 3.13.7 environments. Both final environments contained only `mcp-scopecheck==0.1.0` and pip; `pip check`, `--version`, audit help, unsafe exit `1`, hardened exit `0`, high-threshold exit `1`, and critical-threshold exit `0` all matched the contract.
+- Verified: candidate artifact SHA-256 values were `eec62633219e151be98638862cba0ea05db27edc3842361286e7de83cce13978` for the wheel and `8523017a6deabf51885939ea73a4ad0fbe1e71474a5274f6781d9a165dc2819c` for the sdist.
+- Skipped/blocked: the first manually seeded sdist build environment failed `pip check` because wheel's build-only `packaging` dependency was deliberately omitted with `--no-deps`; it was discarded, recreated with an offline isolated PEP 517 build, and then passed. Python 3.11/3.12 remain unavailable locally. These R3 hashes become historical when the documentation commit changes; R5 will rebuild and rehash the exact final candidate.
+- Decision: no new durable product or security decision was required. The local Git identity matches the proposed `thellmarchitect` repository owner, but public identity and destination still require the existing O002 owner approval.
+- Next: complete R4 public documentation and proof-in-60-seconds demo.
+
+### 2026-08-12 — R4 public documentation and demo complete
+
+- Changed: made the README outcome-first with the exact pre-install static-auditor promise, corrected the output excerpt, clarified diagnostic exit `2`, provided fixture-backed copy/paste use commands, and linked the reproducible demo. Added executable `scripts/demo.sh`, public `docs/release-notes-v0.1.0.md`, and unposted `docs/launch-copy-v0.1.0.md`; reconciled `SECURITY.md`, `CHANGELOG.md`, `docs/positioning.md`, `docs/launch-plan.md`, and sdist content.
+- Verified: `scripts/demo.sh` exited `0` and displayed real unsafe source evidence, the complete 5-S report with file/line/symbol evidence and unsafe exit `1`, the hardened source contrast, its expected filesystem-read capability, `Findings (0)`, hardened exit `0`, and explicit statements that neither server was started.
+- Verified: every literal README command was run. The exact source-install block created `.venv` and installed editable `mcp-scopecheck==0.1.0`; installed unsafe/hardened commands exited `1`/`0`; the exact pinned development-tool install succeeded; the source test command passed 22/22; source unsafe/hardened commands exited `1`/`0`; and the demo command exited `0`. The first sandboxed source and development-tool install attempts failed only because PyPI was unreachable; approved retries of the same commands succeeded.
+- Verified: with the README environment activated, `scripts/preflight.sh` exited `0`: Gitleaks 8.30.1 scanned approximately 234.17 KB and found no leaks; 22/22 tests, compile, Ruff, strict mypy, wheel build, and sdist build passed. Generated environments, caches, build output, and egg-info were removed afterward.
+- Verified: public rule documentation now matches all eight implemented IDs and severities; the `MSC103` and `MSC105` limits, same-file reachability boundary, deterministic `MSC001` behavior, no-runtime-dependency claim, supported inputs, and clean-result caveat agree across README, architecture, release notes, positioning, and launch copy. No deferred feature is presented as shipped, and no uniqueness or completeness superlative is used.
+- Skipped/blocked: launch copy remains explicitly unposted. GitHub private vulnerability reporting cannot be enabled until the owner authorizes repository creation; `SECURITY.md` now gives a non-public fallback without claiming that external configuration already exists.
+- Decision: no durable product or architecture decision changed.
+- Next: complete R5 final fresh-repository preflight and owner handoff.

@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Please use GitHub's private vulnerability reporting for the repository. Do not open a public issue for a suspected vulnerability that could expose users.
+Please use GitHub's private vulnerability reporting when it is enabled for the public repository. If it is unavailable, do not open a public issue containing sensitive details; use the repository owner's private contact channel shown on their GitHub profile until a dedicated security contact is published.
 
 Include:
 
