@@ -4,7 +4,7 @@ Last reconciled: 2026-08-12
 
 ## 1. Mission
 
-Ship a clean, credible v0.1.0 of **MCP ScopeCheck**, a pre-install static auditor for Python MCP servers.
+Ship a clean, credible v0.1.1 of **MCP ScopeCheck**, a pre-install static auditor for Python MCP servers. v0.1.1 is limited to the approved repository-identity and release-automation correction; scanner behavior remains unchanged from v0.1.0.
 
 The product promise is intentionally narrow:
 
@@ -19,7 +19,7 @@ This repository is meant to be production-code evidence, not a throwaway demo. A
 - A clean standalone implementation now exists here under the provisional name `mcp-scopecheck`.
 - The current CLI is functional. It is not the old stub described in the historical handoff.
 - The clean implementation was rebuilt as a zero-runtime-dependency Python package. It is not a copy of the broad legacy application.
-- Every locally executable v0.1 gate through R5 has passed. Owner approval, an owner-approved remote, public CI, security-contact configuration, tagging, and publication remain; nothing has been published.
+- Every locally executable v0.1 gate through R5 passed. The public repository, CI, annotated `v0.1.0` tag, GitHub release, and private vulnerability reporting were completed before the owner-identity migration; PyPI and launch publication remain incomplete.
 
 The uploaded legacy archive contained an environment file, a full virtual environment, caches, macOS metadata, and a nested archive. Treat that archive as reference-only and potentially sensitive. Do not put it inside this repository, inspect its environment values, reuse its Git history, or copy its dependency set.
 
@@ -206,9 +206,9 @@ Codex may proceed locally using the recommended defaults below, but must stop be
 | Gate | Recommended default | Stop required before |
 | --- | --- | --- |
 | Final brand | `mcp-scopecheck` package and CLI; “MCP ScopeCheck” display name | Renaming public artifacts or reserving names |
-| Repository destination | `thellmarchitect/mcp-scopecheck` | Creating/pushing remote repository |
+| Repository destination | `iamudayrathore/mcp-scopecheck` | Transferring or pushing the public repository |
 | v0.1 semantic analyzer | Exclude; keep deterministic and offline | Adding an API/LLM dependency or marketing claim |
-| Publication | GitHub release and PyPI v0.1.0 after all gates | Tagging or publishing |
+| Publication | v0.1.1 after the local RC, public CI, and owner approval | Pushing, tagging, releasing, or publishing |
 | CUSTODY framing | Exclude until ownership/provenance is confirmed | Adding it to public copy |
 
 If the owner changes the brand, update package metadata, import/package naming only if required, CLI, URLs, docs, tests, and artifacts as one atomic migration. Do not partially rename.
@@ -243,7 +243,7 @@ Every checkpoint handback must include:
 Start Codex from the repository root. If `/goal` is available, use:
 
 ```text
-/goal Prepare MCP ScopeCheck v0.1.0 for public release, without performing any external publication, until every locally executable release gate in PLANS.md is complete and documented.
+/goal Prepare the MCP ScopeCheck v0.1.1 repository-identity and release-automation correction without modifying v0.1.0 or performing any external publication, until every locally executable release gate in PLANS.md is complete and documented.
 
 Read AGENTS.md, CODEX_HANDOVER.md, PLANS.md, docs/status.md, docs/decisions.md, and docs/architecture.md before editing. Reproduce the current baseline first. Work checkpoint-by-checkpoint, keep docs/status.md current, and use the acceptance criteria and exact no-target-execution invariant as the contract.
 

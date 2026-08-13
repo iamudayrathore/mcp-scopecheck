@@ -15,7 +15,7 @@ $ mcp-scopecheck audit examples/unsafe_docs_server
 
 The paired hardened fixture retains its intended filesystem-read capability but returns `Findings (0)` and exits `0`.
 
-> Status: v0.1 vertical slice. The project is functional and tested, but has not been published to PyPI.
+> Status: v0.1.x vertical slice. v0.1.1 corrects repository identity and release automation without changing scanner behavior.
 
 ## Why this exists
 

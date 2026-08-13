@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcp-scopecheck"
-version = "0.1.0"
+version = "0.1.1"
 description = "Static claim-versus-capability analysis for Python MCP servers"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -28,8 +28,8 @@ dependencies = []
 mcp-scopecheck = "mcp_scopecheck.cli:main"
 
 [project.urls]
-Issues = "https://github.com/thellmarchitect/mcp-scopecheck/issues"
-Repository = "https://github.com/thellmarchitect/mcp-scopecheck"
+Issues = "https://github.com/iamudayrathore/mcp-scopecheck/issues"
+Repository = "https://github.com/iamudayrathore/mcp-scopecheck"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -43,13 +43,13 @@ A hiring reviewer should be able to scan in this order:
 
 1. Owner reviews the exact release commit and evidence handoff.
 2. Publish the repository and GitHub release.
-3. Publish and verify PyPI v0.1.0 from a fresh environment.
+3. Publish and verify PyPI v0.1.1 from a fresh environment.
 4. Add verified public links to README/release metadata if needed through a patch release-safe process.
 5. Publish the short demo video/post.
 6. Pin a concise call to action: run it on a local Python MCP server, open issues with minimal fixtures, and treat clean output as a starting point rather than proof of safety.
 7. Collect concrete false-positive/false-negative examples for the evaluation corpus.
 
-Prepared copy is in `docs/launch-copy-v0.1.0.md`; release notes are in `docs/release-notes-v0.1.0.md`. Both remain drafts until owner approval and must be checked against the exact final candidate before publication.
+The v0.1.0 launch copy remains an unposted historical draft and must not be reused automatically. v0.1.1 release notes are in `docs/release-notes-v0.1.1.md`; any later launch content requires separate owner approval and must be checked against the published package.
 
 ## Interview narrative
 

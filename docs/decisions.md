@@ -64,6 +64,18 @@ Decision: `MSC103` does not accept `.resolve()` alone as evidence of containment
 
 Reason: normalization is not a boundary check, and source-order-insensitive assignment collection creates an avoidable false positive when a network call precedes an environment read. The narrowed behavior improves obvious cases without claiming dominance, full control-flow analysis, or interprocedural taint tracking.
 
+### D011 — GitHub owner identity migration
+
+Decision: change only the GitHub owner identity from `thellmarchitect` to `iamudayrathore`. Keep `mcp-scopecheck` unchanged as the repository, package, CLI, project, workflow, artifact, and release-tag name. Current repository and package-metadata URLs use `https://github.com/iamudayrathore/mcp-scopecheck`. Historical validation evidence keeps the owner identity that was true when each check or release action occurred.
+
+Reason: the owner approved a public identity change without authorizing a project rename or rewriting immutable v0.1.0 release history. PyPI Trusted Publishing must use owner `iamudayrathore`, repository `mcp-scopecheck`, workflow `release.yml`, and environment `pypi` after the GitHub repository transfer.
+
+### D012 — v0.1.1 metadata-only correction
+
+Decision: publish the owner-identity and Trusted Publishing correction as v0.1.1. Preserve the existing v0.1.0 tag, GitHub release, and artifacts exactly; never rebuild or replace them. v0.1.1 changes no scanner behavior, rule output, CLI contract, security boundary, or runtime dependency.
+
+Reason: the immutable v0.1.0 distributions embed the former repository URL. A patch release is the only safe way to publish corrected metadata without rewriting released artifacts.
+
 ## Owner decisions required before external publication
 
 ### O001 — final public name
@@ -74,13 +86,13 @@ Why owner input is required: names and package releases are costly to change aft
 
 ### O002 — public repository identity
 
-Recommended: `https://github.com/thellmarchitect/mcp-scopecheck`, matching current package metadata.
+Approved destination: `https://github.com/iamudayrathore/mcp-scopecheck`, matching current package metadata.
 
-Why owner input is required: this is a public identity and ownership choice. Update metadata atomically if the account or organization differs.
+The owner approved this identity migration on 2026-08-13. D011 records the constraints and historical-evidence policy.
 
 ### O003 — publication sequence
 
-Recommended: approve one reviewed release candidate, then publish the clean GitHub repository/release and PyPI v0.1.0 in the same controlled release window. Verify a fresh PyPI install before launch posts.
+Approved sequence for v0.1.1: push the reviewed release-candidate commit, require public CI, create the annotated tag, publish the GitHub release, use PyPI Trusted Publishing, and verify a fresh PyPI install before any launch post.
 
 ### O004 — CUSTODY framing
 

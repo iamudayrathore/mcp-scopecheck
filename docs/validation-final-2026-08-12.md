@@ -1,5 +1,7 @@
 # Final local validation — 2026-08-12
 
+> Historical v0.1.0 evidence: owner names, repository availability, identity, and release-gate statements below record the state observed during the v0.1.0 validation and are intentionally not rewritten after the owner migration.
+
 This record closes every locally executable release gate through R5. It does not authorize or claim a remote repository, public CI result, tag, PyPI release, security-setting change, or launch post.
 
 ## Source and environment

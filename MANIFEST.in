@@ -8,6 +8,7 @@ include requirements-dev.txt
 include docs/architecture.md
 include docs/positioning.md
 include docs/release-notes-v0.1.0.md
+include docs/release-notes-v0.1.1.md
 recursive-include examples *.py
 include scripts/preflight.sh
 include scripts/demo.sh

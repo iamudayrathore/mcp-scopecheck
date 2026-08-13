@@ -1,23 +1,20 @@
-# Release checklist
+# v0.1.1 release checklist
 
-Do not publish until every item is complete.
+Do not publish until every item is complete. Preserve v0.1.0 exactly.
 
-- [x] Re-check the project, repository, PyPI package, and CLI names for collisions.
-- [ ] Obtain owner approval for the final name and repository destination in `docs/decisions.md`.
-- [x] Review every diff for legacy-project branding or unrelated code.
-- [x] Create a fresh environment and install the pinned tools with `.venv/bin/python -m pip install --disable-pip-version-check -r requirements-dev.txt`.
-- [x] Run `scripts/preflight.sh` locally with `gitleaks` installed.
-- [x] Confirm the preflight's unit-test, compile, Ruff, strict mypy, wheel, and source-distribution gates all pass in the pinned development environment.
-- [x] Confirm the unsafe fixture exits `1` with the expected rule IDs.
-- [x] Confirm the hardened fixture exits `0`.
-- [x] Build wheel and source distribution from a clean checkout.
-- [x] Install wheel and source distribution into separate fresh environments.
-- [x] Run both fixtures and `pip check` from each fresh installed distribution.
-- [x] Review the generated package contents; exclude caches, environments, `.env`, and demo artifacts not intended for release.
-- [x] Generate and record artifact SHA-256 checksums.
-- [x] Confirm CI actions remain pinned to reviewed commit SHAs.
-- [x] Confirm README commands and public claims match the release candidate.
-- [ ] Enable GitHub private vulnerability reporting or approve a durable private security contact.
-- [ ] Tag `v0.1.0` only after CI passes from the release commit.
-- [ ] Publish release notes that state supported inputs and known blind spots.
-- [ ] Obtain explicit owner approval before remote creation/push, tag, PyPI publication, or launch post.
+- [x] Confirm the approved `iamudayrathore/mcp-scopecheck` identity and unchanged package/CLI names.
+- [x] Confirm v0.1.0 tag, release, and artifact digests before preparing the patch.
+- [ ] Confirm the GitHub `pypi` environment exists and matches `.github/workflows/release.yml`.
+- [x] Confirm the PyPI pending Trusted Publisher tuple with the owner.
+- [x] Review the final v0.1.1 diff for identity/version-only scope.
+- [x] Run Gitleaks, 22 tests, compile, Ruff, strict mypy, wheel, and sdist gates.
+- [x] Inspect both archives and confirm version, URLs, dependencies, and intended contents.
+- [x] Install wheel and sdist separately and verify `pip check`, version, help, thresholds, and fixtures.
+- [x] Generate and record final artifact SHA-256 checksums.
+- [x] Create the single local v0.1.1 release-candidate commit.
+- [ ] Push the reviewed release-candidate commit only after explicit authorization.
+- [ ] Require public CI on Python 3.11-3.13 to pass on the exact commit.
+- [ ] Create annotated `v0.1.1` only after explicit authorization; never move v0.1.0.
+- [ ] Create the GitHub v0.1.1 release with reviewed artifacts and checksums.
+- [ ] Publish through the configured PyPI Trusted Publisher.
+- [ ] Verify a cache-disabled fresh PyPI installation before any launch content.

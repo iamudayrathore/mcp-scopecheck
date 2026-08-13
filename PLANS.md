@@ -4,7 +4,7 @@ Last updated: 2026-08-12
 
 ## Objective and stopping condition
 
-Objective: prepare v0.1.0 for public release as a clean, reproducible, evidence-backed Python security tool.
+Objective: prepare v0.1.1 as a clean, reproducible repository-identity and release-automation correction with no scanner behavior change.
 
 Local-build stopping condition: every locally executable gate through R5 passes from a clean checkout and is recorded in `docs/status.md`.
 
@@ -22,7 +22,7 @@ Work one checkpoint at a time. Do not begin v0.2 work while a v0.1 gate is open.
 | R3 | Prove clean install and release candidate | Complete |
 | R4 | Finish public documentation and demo | Complete |
 | R5 | Fresh repository preflight | Complete locally; public CI awaits owner-approved remote |
-| R6 | Owner-approved publication | Blocked on owner approval |
+| R6 | Owner-approved publication | v0.1.1 local release candidate complete; external actions pending |
 | P1+ | Post-release product roadmap | Deferred |
 
 ## R0 — baseline reconciliation and decisions
@@ -159,16 +159,16 @@ Acceptance:
 
 ## R6 — publication, only after explicit owner approval
 
-Goal: publish exactly the reviewed candidate, once.
+Goal: publish exactly the reviewed v0.1.1 correction once while preserving v0.1.0 unchanged.
 
 Tasks:
 
-1. Create or confirm the public repository at the approved destination.
-2. Push the clean standalone history.
-3. Confirm public CI and security checks pass.
-4. Create signed/annotated `v0.1.0` tag according to the chosen policy.
-5. Create the GitHub release with the reviewed notes and checksums.
-6. Publish to PyPI using current trusted-publishing guidance where possible.
+1. Confirm the public repository and `pypi` environment at the approved destination.
+2. Push the reviewed v0.1.1 release-candidate commit.
+3. Confirm public CI and security checks pass on that exact commit.
+4. Create the annotated `v0.1.1` tag without moving or replacing v0.1.0.
+5. Create the GitHub v0.1.1 release with the reviewed notes and checksums.
+6. Publish v0.1.1 to PyPI using the configured Trusted Publisher.
 7. Install from PyPI in a fresh environment and rerun the two fixtures.
 8. Publish the prepared launch assets only after package verification.
 

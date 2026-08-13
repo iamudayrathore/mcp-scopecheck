@@ -4,7 +4,7 @@ Last updated: 2026-08-12
 
 ## Current state
 
-MCP ScopeCheck v0.1.0 has completed every locally executable release gate through R5. The clean standalone history, exact rule/output tests, pinned quality gates, Gitleaks, reviewed distributions, separate clean installs, public documentation, and real terminal demo are validated. It has not been publicly released.
+MCP ScopeCheck v0.1.0 remains published on GitHub and unchanged. A local v0.1.1 release candidate has been prepared solely to correct the GitHub owner identity and add Trusted Publishing automation; PyPI and launch publication have not occurred.
 
 ## Evidence on record
 
@@ -12,15 +12,13 @@ See `docs/validation-final-2026-08-12.md` for the final local evidence. Exact fi
 
 ## Open release blockers
 
-- Owner approval of the final public name and repository destination.
-- Owner approval and final availability/reservation check for GitHub, PyPI package, and CLI names immediately before reservation. A provisional read-only check passed on 2026-08-12.
-- Owner approval of author/owner presentation and a durable private security-reporting channel.
-- Public CI on Python 3.11–3.13 after the owner authorizes a remote push.
-- Owner approval for remote creation, push, tag, PyPI publication, and launch.
+- The GitHub `pypi` environment must exist and match the configured PyPI pending publisher.
+- The owner must separately authorize push, tag, GitHub release, Trusted Publishing, and launch steps.
+- Public CI on Python 3.11–3.13 must pass on the exact v0.1.1 release-candidate commit before tagging.
 
 ## Next checkpoint
 
-Owner gate for R6: approve the final name, repository destination, author/owner presentation, security-reporting setup, exact diff, and proposed publication sequence. Recommended defaults remain O001-O003 in `docs/decisions.md`; enable GitHub private vulnerability reporting when the repository is created. No external action should occur before that approval.
+Complete and review the local v0.1.1 release-candidate commit. Then follow the separately authorized sequence: push main, public CI, annotated v0.1.1 tag, GitHub release, Trusted Publishing, and fresh PyPI verification. Launch remains a later owner gate.
 
 ## Codex progress log
 
@@ -35,6 +33,8 @@ Append entries using this format:
 - Decision: link to docs/decisions.md entry, if any
 - Next: one checkpoint or owner action
 ```
+
+Entries below are dated historical evidence. Identity, availability, and release-state statements describe the state observed at that time and are not rewritten retroactively.
 
 ### 2026-08-10 — Handover reconciliation
 
@@ -111,3 +111,23 @@ Append entries using this format:
 - Skipped/blocked: Python 3.11 and 3.12 are not locally installed; public matrix execution requires an owner-approved remote. Name reservation, security-setting configuration, remote creation/push, tag, GitHub/PyPI publication, and launch remain owner/external gates and were not performed.
 - Decision: no new product/dependency/security-boundary decision was required. Recommended owner default: approve O001-O003, keep O004 excluded, enable GitHub private vulnerability reporting, then publish the exact reviewed candidate only after public CI passes.
 - Next: owner approval for R6 external actions.
+
+### 2026-08-13 — local GitHub owner-identity migration prepared
+
+- Changed: updated the local `origin` URL and current package/control references from the former GitHub owner to `iamudayrathore`, without changing the `mcp-scopecheck` repository, package, CLI, project, tag, workflow, or artifact names. Added `.github/workflows/release.yml` as a manual-only, annotated-tag-verified PyPI Trusted Publishing workflow using environment `pypi` and immutable action SHAs. No push, tag, release, PyPI upload, or launch post was performed.
+- Preserved: dated validation records and earlier status entries retain the former owner identity because it was the value actually checked or used at that time. The published `v0.1.0` tag and GitHub release were not moved or replaced.
+- Decision: D011 records the owner-only rebrand and the intended Trusted Publisher tuple: owner `iamudayrathore`, repository `mcp-scopecheck`, workflow `release.yml`, environment `pypi`.
+- Verified: `PATH=/private/tmp/mcp-scopecheck-r5.4gnYpb/dev-venv/bin:$PATH scripts/preflight.sh` exited `0`: Gitleaks 8.30.1 scanned approximately 161.99 KB with no leaks; 22/22 tests, compilation, Ruff 0.16.2, strict mypy 2.3.0, wheel build, and sdist build passed. Ruby parsed both workflow YAML files, and the publishing workflow's checkout, Python setup, and PyPI publishing actions are pinned to reviewed full commit SHAs.
+- Verified: read-only GitHub API checks resolve both the new and former repository paths to the public `iamudayrathore/mcp-scopecheck` repository, proving the owner transfer is complete and the former path redirects. Private vulnerability reporting remains enabled. The GitHub `pypi` environment is not configured, and the PyPI project endpoint still returns `404`.
+- External follow-up: create/protect the GitHub `pypi` environment, then create or replace the PyPI pending publisher with the D011 tuple after this workflow is reviewed and pushed. Because the immutable v0.1.0 artifacts embed the former repository URL, publish corrected metadata under a new patch version rather than changing the v0.1.0 tag or artifacts.
+- Next: wait for explicit authorization before any commit or push.
+
+### 2026-08-12 — v0.1.1 local release candidate validated
+
+- Changed: bumped package and CLI-reported version to 0.1.1; added concise v0.1.1 notes; reconciled current repository URLs, owner/release decisions, checklist, plan, status, and launch plan; and retained the manual-only, annotated-tag-verified Trusted Publishing workflow. No analyzer, parser, auditor, renderer, CLI behavior, model, fixture, test, dependency, or rule-output change was made.
+- Verified: the GitHub repository is `iamudayrathore/mcp-scopecheck`, the configured PyPI pending publisher tuple was confirmed by the owner, and `.github/workflows/release.yml` references environment `pypi` exactly. The GitHub environment API returned `404`, so environment creation remains an external blocker rather than a pass.
+- Verified: `PATH=/private/tmp/mcp-scopecheck-r5.4gnYpb/dev-venv/bin:$PATH scripts/preflight.sh` exited `0`: Gitleaks 8.30.1 scanned approximately 178.76 KB with no leaks; 22/22 tests including the target non-execution sentinel passed; compilation, Ruff 0.16.2, strict mypy 2.3.0, wheel build, and sdist build passed.
+- Verified: manual wheel/sdist listings contained only intended public files. Both metadata records report `mcp-scopecheck` 0.1.1, author Uday Rathore, Python 3.11+, no runtime dependency, the unchanged console entry point, and repository/issues links under `iamudayrathore/mcp-scopecheck`.
+- Verified: separate fresh Python 3.13.7 wheel and sdist environments installed offline. Both contained only `mcp-scopecheck==0.1.1` and pip; `pip check`, version, top-level/audit help, unsafe exit `1` with the same six rule IDs, hardened exit `0`, high-threshold exit `1`, and critical-threshold exit `0` passed.
+- Preserved: remote and local v0.1.0 still resolve to tag object `34913eb59c9297ea37fc3953c45bdea15792059a`, commit `5d174ffee5b1ba529801c84fe4b68268354d4b2c`, and tree `5ab430161e5152dafd24d195b57004f3a4005b0b`; the GitHub release asset digests remain unchanged.
+- Next: after the `pypi` environment exists and the owner authorizes external actions, push main, require public CI, tag v0.1.1, create its GitHub release, use Trusted Publishing, and verify a fresh PyPI install. Do not publish launch content yet.

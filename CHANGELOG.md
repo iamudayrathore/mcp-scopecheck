@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.1.0 - Unreleased
+## 0.1.1 - 2026-08-12
+
+- Updated repository metadata for the `iamudayrathore` GitHub owner identity.
+- Added a manual, tag-verified PyPI Trusted Publishing workflow.
+- No scanner behavior, rule output, CLI contract, or runtime dependency changed.
+
+## 0.1.0 - 2026-08-13
 
 - Added non-executing Python AST tool discovery.
 - Added same-file helper-call reachability.
