@@ -9,7 +9,8 @@
 
 ## Quick start
 
-Python 3.11 or newer is required. Install the dependency-free scanner from PyPI:
+Python 3.11 or newer is required; CI tests 3.11, 3.12, and 3.13. Install the
+dependency-free scanner from PyPI:
 
 ```bash
 python -m pip install mcp-scopecheck
@@ -22,6 +23,13 @@ pipx install mcp-scopecheck
 ```
 
 Audit a local Python file or directory:
+
+```bash
+mcp-scopecheck audit path/to/server.py
+```
+
+From this repository checkout, the bundled unsafe fixture provides a
+reproducible first audit:
 
 ```bash
 mcp-scopecheck audit examples/unsafe_docs_server
@@ -68,12 +76,12 @@ ScopeCheck reads source as text and parses it with Python's `ast` module. Target
 
 | Rule | Severity | What it means |
 | --- | --- | --- |
-| `MSC001` | Critical | Tool description contains instructions aimed at controlling or concealing behavior from the host model/user |
+| `MSC001` | Critical | Deterministic indicator families find agent-directed override, concealment, covert transfer, or related high-risk wording |
 | `MSC101` | High/Critical | `readOnlyHint=true` conflicts with justified state-changing behavior; process and dynamic code conflicts are Critical |
-| `MSC102` | High | Reachable network egress is missing from the tool description |
-| `MSC103` | High | Path-like input reaches filesystem operations without a recognized containment check |
-| `MSC104` | High | A path/root parameter defaults to `/` or `~` |
-| `MSC105` | Critical | Environment-derived data reaches a network call in the same reachable function |
+| `MSC102` | High | Reachable egress lacks a clear external-interaction disclosure, contradicts an explicit denial, or conflicts with a supported static destination check |
+| `MSC103` | High | A correlated path-like input reaches a filesystem operation without a recognized guard on that value |
+| `MSC104` | High | A path/root parameter defaults to the POSIX root or to an exact home root that code actually expands |
+| `MSC105` | Critical | Environment-derived data reaches a supported module or proven client-instance network sink in the same reachable function |
 | `MSC106` | Critical | Process or shell execution is reachable |
 | `MSC107` | Critical | `eval` or `exec` is reachable |
 | `MSC108` | High | `openWorldHint=false` conflicts with reachable external network interaction |
@@ -98,19 +106,36 @@ v0.1 intentionally supports:
 
 - Local Python files/directories
 - Module-level `@mcp.tool`, `@mcp.tool()`, and equivalent `.tool` decorators
-- Same-file helper-call reachability
-- Direct module calls and flow-proven `httpx.Client`, `httpx.AsyncClient`, and `requests.Session` request sinks
+- Direct same-file module and nested sync/async helper-call reachability
+- Module-level and function-local import aliases with statement-order shadowing
+- Qualified network-module calls and flow-proven `httpx.Client`,
+  `httpx.AsyncClient`, `requests.Session`, and `requests.sessions.Session` request
+  sinks
+- Qualified builtin, `pathlib`, `os`, and `shutil` filesystem operations with
+  static open-mode/flag handling
 
 It does **not** yet prove:
 
-- Cross-module or dynamically dispatched call paths
+- Cross-module, callback, function-alias, lambda, or class-method call paths
 - Runtime-only tool registration
 - TypeScript/JavaScript behavior
 - Authorization correctness
 - Whether all observed data actually leaves the process, except the narrow same-function flow implemented by `MSC105`
 - Safety of a running MCP server
 
-`MSC103` requires a recognized containment comparison; `.resolve()` by itself is only normalization and does not suppress the finding. `MSC105` follows direct environment reads, simple value assignments, and proven local HTTP-client bindings in lexical order within one function. Client aliases are limited to direct name-to-name assignment; ScopeCheck does not model complete Python control flow or general points-to relationships.
+`MSC001` and `MSC102` are deterministic description checks, not semantic or LLM
+analysis. `MSC103` correlates simple path aliases and transformations with the
+guarded value; `.resolve()` alone is only normalization. `MSC105` follows direct
+environment reads, simple value assignments, and proven local HTTP-client
+bindings in lexical order within one function. Reassignment and deletion kill a
+client binding. ScopeCheck does not model complete Python control flow, general
+points-to relationships, or interprocedural environment taint.
+
+Audits fail incomplete with exit `2` when fixed safety limits are exceeded:
+1 MB per file, 5,000 Python files, 20 MB total source, 500,000 AST nodes, 200 AST
+levels, or 100 retained diagnostics. A symlink supplied as the target is rejected;
+symlinked files and directories encountered inside a directory target are
+skipped without following them.
 
 A clean report is not proof of safe runtime behavior. See [architecture and threat model](docs/architecture.md).
 

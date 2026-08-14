@@ -73,6 +73,19 @@ class CliTests(unittest.TestCase):
         self.assertIn("Diagnostics (1)", output)
         self.assertIn("audit incomplete because diagnostics were reported", error)
 
+    def test_single_file_report_displays_the_requested_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "server.py"
+            target.write_text(
+                "@mcp.tool()\ndef example():\n    return 'ok'\n",
+                encoding="utf-8",
+            )
+            code, output, error = invoke(["audit", str(target)])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(error, "")
+        self.assertIn(f"Target: {target.resolve()}", output)
+
     def test_internal_failures_are_not_mislabeled_as_target_errors(self) -> None:
         with patch("mcp_scopecheck.cli.audit", side_effect=RuntimeError("internal failure")):
             with self.assertRaisesRegex(RuntimeError, "internal failure"):

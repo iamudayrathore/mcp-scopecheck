@@ -141,6 +141,15 @@ that a supported filesystem API is reached, but not whether it writes, so v0.1
 records the read capability as a lower bound. This may under-report a dynamic
 write and deliberately does not create a read-only/write contradiction.
 
+Network capability evidence includes qualified calls resolved beneath
+`requests`, `httpx`, `aiohttp`, `urllib.request`, `http.client`, and `socket`,
+plus supported request methods on flow-proven `httpx.Client`,
+`httpx.AsyncClient`, `requests.Session`, and `requests.sessions.Session`
+instances. Known client construction alone is not egress. Module-prefix matching
+is deliberately syntactic and can classify calls without proving their runtime
+transport; proven instance methods require a constructor binding that remains
+live at that statement.
+
 `MSC103` tracks exact path-like parameter names and common suffixes such as
 `*_path` through simple aliases, supported path transformations, and direct
 same-file helper calls. A guard applies only to the value lineage checked before
@@ -163,8 +172,9 @@ roots or UNC shares, and unresolved dynamic defaults are left unknown.
 `MSC105` follows direct environment reads and simple name-to-name or payload
 assignments in lexical order within one reachable function. Network sinks include
 supported module calls and methods on flow-proven `httpx.Client`,
-`httpx.AsyncClient`, and `requests.Session` bindings. Plain and annotated
-assignments, sync/async context managers, direct aliases, reassignment, deletion,
-and basic name shadowing update those bindings in statement order. Constructing a
-client is not egress. This is not full control-flow, points-to, interprocedural,
-or field-sensitive taint analysis.
+`httpx.AsyncClient`, `requests.Session`, and `requests.sessions.Session`
+bindings. Plain and annotated assignments, sync/async context managers, direct
+aliases, reassignment, deletion, and basic name shadowing update those bindings
+in statement order. Constructing a client is not egress. Environment taint does
+not cross a helper-call argument or return boundary. This is not full
+control-flow, points-to, interprocedural, or field-sensitive taint analysis.

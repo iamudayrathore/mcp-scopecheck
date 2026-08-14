@@ -585,7 +585,7 @@ def parse_project(target: str | Path) -> ParsedProject:
     if not root.is_file() and not root.is_dir():
         raise ParseTargetError(f"target is not a regular file or directory: {requested}")
     project_root = root.parent if root.is_file() else root
-    project = ParsedProject(root=project_root)
+    project = ParsedProject(root=root)
 
     try:
         candidates = list(_candidate_files(root))
