@@ -113,7 +113,24 @@ that a supported filesystem API is reached, but not whether it writes, so v0.1
 records the read capability as a lower bound. This may under-report a dynamic
 write and deliberately does not create a read-only/write contradiction.
 
-`MSC103` requires a recognized containment comparison such as `relative_to`, `is_relative_to`, or `commonpath`; path normalization with `resolve()` alone is not treated as containment. The rule still does not prove that a guard dominates a filesystem sink or compares against the correct trusted root.
+`MSC103` tracks exact path-like parameter names and common suffixes such as
+`*_path` through simple aliases, supported path transformations, and direct
+same-file helper calls. A guard applies only to the value lineage checked before
+the sink. Recognized forms are a successful `Path.relative_to(fixed_root)` call,
+a checked `Path.is_relative_to(fixed_root)` branch whose rejecting path
+terminates, and an equality check between `os.path.commonpath(...)` and an
+untainted root. Branch joins retain a guard only when every continuing path does.
+Calling a guard-like method on an unrelated value or merely normalizing with
+`resolve()` does not constrain a sink. This remains static evidence: it does not
+prove symlink safety, eliminate time-of-check/time-of-use races, or model dynamic
+dispatch and arbitrary validation helpers.
+
+`MSC104` statically recognizes the POSIX root in string and supported
+`pathlib.Path` defaults. Exact `~` and `~/` defaults are treated as the home root
+only when the default or reachable code applies `Path.expanduser`,
+`os.path.expanduser`, or `Path.home`. Bounded values such as `~/.scopecheck` are
+not equated with the entire home directory. v0.1 does not normalize Windows drive
+roots or UNC shares, and unresolved dynamic defaults are left unknown.
 
 `MSC105` follows direct environment reads and simple name-to-name or payload
 assignments in lexical order within one reachable function. Network sinks include

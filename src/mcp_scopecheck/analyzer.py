@@ -85,11 +85,6 @@ NETWORK_CLIENT_METHODS = {
 }
 PROCESS_PREFIXES = ("asyncio.create_subprocess_", "subprocess.")
 PROCESS_CALLS = {"os.popen", "os.system"}
-PATH_GUARDS = {
-    "os.path.commonpath",
-    "pathlib.Path.is_relative_to",
-    "pathlib.Path.relative_to",
-}
 PATH_PARAMETER_NAMES = {
     "dir",
     "directory",
@@ -100,6 +95,7 @@ PATH_PARAMETER_NAMES = {
     "path",
     "root",
 }
+PATH_PARAMETER_SUFFIXES = ("_dir", "_directory", "_file", "_folder", "_path")
 
 POISONING_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
@@ -279,6 +275,11 @@ def _assigned_names(node: ast.AST) -> set[str]:
     return set()
 
 
+def _is_path_parameter_name(name: str) -> bool:
+    normalized = name.lstrip("*").lower()
+    return normalized in PATH_PARAMETER_NAMES or normalized.endswith(PATH_PARAMETER_SUFFIXES)
+
+
 @dataclass
 class _ExecutionResult:
     """Executable nodes and lexical resolutions for one function body."""
@@ -288,6 +289,8 @@ class _ExecutionResult:
     visited_ids: set[int] = field(default_factory=set)
     imports_by_node: dict[int, dict[str, str]] = field(default_factory=dict)
     call_edges: list[FunctionRecord] = field(default_factory=list)
+    call_edges_by_call: dict[int, FunctionRecord] = field(default_factory=dict)
+    nested_call_ids: set[int] = field(default_factory=set)
     instance_network_calls: dict[int, str] = field(default_factory=dict)
     path_filesystem_calls: dict[int, tuple[str, Capability]] = field(default_factory=dict)
 
@@ -515,6 +518,9 @@ class _ExecutionVisitor(ast.NodeVisitor):
         self._remember(node, event=True)
         imports = self.result.imports_for(node)
         edge = self._direct_call_edge(node)
+        is_nested_edge = (
+            isinstance(node.func, ast.Name) and node.func.id in self.nested
+        )
         instance_symbol = self._instance_symbol(node, imports)
         if instance_symbol is not None:
             self.result.instance_network_calls[id(node)] = instance_symbol
@@ -524,6 +530,9 @@ class _ExecutionVisitor(ast.NodeVisitor):
         self.generic_visit(node)
         if edge is not None:
             self.result.call_edges.append(edge)
+            self.result.call_edges_by_call[id(node)] = edge
+            if is_nested_edge:
+                self.result.nested_call_ids.add(id(node))
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
         self._remember(node)
@@ -777,19 +786,531 @@ def analyze_capabilities(
     return observed
 
 
-def _has_path_guard(
-    records: Iterable[FunctionRecord],
-    project: ParsedProject,
-) -> bool:
-    for record in records:
-        execution = _execution(record, project)
-        for node in execution.nodes:
-            if not isinstance(node, ast.Call):
+@dataclass(frozen=True)
+class _PathValue:
+    sources: frozenset[str] = frozenset()
+    tokens: frozenset[int] = frozenset()
+
+
+@dataclass
+class _PathFlowState:
+    bindings: dict[str, _PathValue]
+    guarded: set[int]
+
+
+@dataclass(frozen=True)
+class _PathSinkFlow:
+    sources: frozenset[str]
+    evidence: Evidence
+
+
+@dataclass
+class _PathScopeResult:
+    sinks: list[_PathSinkFlow] = field(default_factory=list)
+    expanded_sources: set[str] = field(default_factory=set)
+
+
+PATH_TRANSFORM_CALLS = {
+    "os.fspath",
+    "os.path.abspath",
+    "os.path.expanduser",
+    "os.path.join",
+    "os.path.normpath",
+    "os.path.realpath",
+    "pathlib.Path",
+    "str",
+}
+TWO_PATH_CALLS = {
+    "os.rename",
+    "os.replace",
+    "shutil.copy",
+    "shutil.copy2",
+    "shutil.copyfile",
+    "shutil.move",
+}
+
+
+class _PathFlowVisitor(ast.NodeVisitor):
+    """Correlate path-like tool inputs, guards, and filesystem sinks."""
+
+    def __init__(
+        self,
+        record: FunctionRecord,
+        project: ParsedProject,
+        bindings: dict[str, _PathValue],
+        guarded: set[int],
+        result: _PathScopeResult,
+        active: set[int],
+    ) -> None:
+        self.record = record
+        self.project = project
+        self.execution = _execution(record, project)
+        self.bindings = dict(bindings)
+        self.guarded = set(guarded)
+        self.result = result
+        self.active = active
+
+    def scan(self) -> set[int]:
+        identity = id(self.record.node)
+        if identity in self.active:
+            return set(self.guarded)
+        self.active.add(identity)
+        try:
+            for statement in self.record.node.body:
+                self.visit(statement)
+        finally:
+            self.active.remove(identity)
+        return set(self.guarded)
+
+    def _state(self) -> _PathFlowState:
+        return _PathFlowState(dict(self.bindings), set(self.guarded))
+
+    def _restore(self, state: _PathFlowState) -> None:
+        self.bindings = dict(state.bindings)
+        self.guarded = set(state.guarded)
+
+    def _merge_states(self, first: _PathFlowState, second: _PathFlowState) -> None:
+        self.bindings = {
+            name: value
+            for name, value in first.bindings.items()
+            if second.bindings.get(name) == value
+        }
+        self.guarded = first.guarded & second.guarded
+
+    def _derived(self, node: ast.AST, values: Iterable[_PathValue]) -> _PathValue:
+        items = list(values)
+        sources = frozenset(source for value in items for source in value.sources)
+        if not sources:
+            return _PathValue()
+        token = id(node)
+        original_tokens = {item for value in items for item in value.tokens}
+        if original_tokens and original_tokens <= self.guarded:
+            self.guarded.add(token)
+        return _PathValue(sources, frozenset({token}))
+
+    def _value(self, node: ast.AST) -> _PathValue:
+        if isinstance(node, ast.Name):
+            return self.bindings.get(node.id, _PathValue())
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Div)):
+            return self._derived(node, [self._value(node.left), self._value(node.right)])
+        if isinstance(node, ast.JoinedStr):
+            return self._derived(
+                node,
+                [self._value(value) for value in node.values],
+            )
+        if isinstance(node, ast.FormattedValue):
+            return self._value(node.value)
+        if isinstance(node, ast.Attribute) and node.attr == "parent":
+            return self._derived(node, [self._value(node.value)])
+        if not isinstance(node, ast.Call):
+            return _PathValue()
+        imports = self.execution.imports_for(node)
+        name = _qualified_name(node.func, imports)
+        if name in {"os.fspath", "str"}:
+            values = [self._value(argument) for argument in node.args]
+            return _PathValue(
+                frozenset(source for value in values for source in value.sources),
+                frozenset(token for value in values for token in value.tokens),
+            )
+        if name in PATH_TRANSFORM_CALLS:
+            return self._derived(node, [self._value(argument) for argument in node.args])
+        if isinstance(node.func, ast.Attribute) and node.func.attr in {
+            *PATH_RETURNING_METHODS,
+            "glob",
+            "iterdir",
+            "relative_to",
+            "rglob",
+        }:
+            return self._derived(
+                node,
+                [self._value(node.func.value), *[self._value(arg) for arg in node.args]],
+            )
+        return _PathValue()
+
+    def _assign(self, targets: Iterable[ast.AST], value: _PathValue) -> None:
+        for target in targets:
+            for name in _assigned_names(target):
+                if value.sources:
+                    self.bindings[name] = value
+                else:
+                    self.bindings.pop(name, None)
+
+    def _guard_tokens(self, call: ast.Call) -> set[int]:
+        if not isinstance(call.func, ast.Attribute) or not call.args:
+            return set()
+        if call.func.attr not in {"is_relative_to", "relative_to"}:
+            return set()
+        candidate = self._value(call.func.value)
+        trusted_root = self._value(call.args[0])
+        if not candidate.sources or trusted_root.sources:
+            return set()
+        return set(candidate.tokens)
+
+    def _commonpath_guard_tokens(self, node: ast.Compare, truthy: bool) -> set[int]:
+        if len(node.ops) != 1:
+            return set()
+        equality_holds = (
+            isinstance(node.ops[0], ast.Eq) and truthy
+        ) or (
+            isinstance(node.ops[0], ast.NotEq) and not truthy
+        )
+        if not equality_holds:
+            return set()
+        if len(node.comparators) != 1:
+            return set()
+        sides = (node.left, node.comparators[0])
+        for commonpath, root in (sides, reversed(sides)):
+            if not isinstance(commonpath, ast.Call) or not commonpath.args:
                 continue
-            name = _display_name(node.func, execution.imports_for(node))
-            if name in PATH_GUARDS or name.endswith((".is_relative_to", ".relative_to")):
-                return True
-    return False
+            imports = self.execution.imports_for(commonpath)
+            if _qualified_name(commonpath.func, imports) != "os.path.commonpath":
+                continue
+            if self._value(root).sources:
+                continue
+            paths = commonpath.args[0]
+            if not isinstance(paths, (ast.List, ast.Tuple)):
+                continue
+            candidates = [self._value(item) for item in paths.elts]
+            tainted = [candidate for candidate in candidates if candidate.sources]
+            if len(tainted) == 1:
+                return set(tainted[0].tokens)
+        return set()
+
+    def _conditional_guard_tokens(self, node: ast.AST, truthy: bool) -> set[int]:
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            return self._conditional_guard_tokens(node.operand, not truthy)
+        if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And) and truthy:
+            return {
+                token
+                for value in node.values
+                for token in self._conditional_guard_tokens(value, True)
+            }
+        if isinstance(node, ast.Call) and truthy:
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "is_relative_to":
+                return self._guard_tokens(node)
+        if isinstance(node, ast.Compare):
+            return self._commonpath_guard_tokens(node, truthy)
+        return set()
+
+    def _sink_value(self, call: ast.Call) -> _PathValue:
+        path_call = self.execution.path_filesystem_calls.get(id(call))
+        if path_call is not None and isinstance(call.func, ast.Attribute):
+            values = [self._value(call.func.value)]
+            if call.func.attr in {"rename", "replace"} and call.args:
+                values.append(self._value(call.args[0]))
+            sources = frozenset(
+                source for value in values for source in value.sources
+            )
+            tokens = frozenset(token for value in values for token in value.tokens)
+            return _PathValue(sources, tokens)
+
+        imports = self.execution.imports_for(call)
+        name = _qualified_name(call.func, imports)
+        indexes = (0, 1) if name in TWO_PATH_CALLS else (0,)
+        values = [self._value(call.args[index]) for index in indexes if len(call.args) > index]
+        for keyword in call.keywords:
+            if keyword.arg in {"file", "filename", "path", "src", "dst"}:
+                values.append(self._value(keyword.value))
+        sources = frozenset(source for value in values for source in value.sources)
+        tokens = frozenset(token for value in values for token in value.tokens)
+        return _PathValue(sources, tokens)
+
+    def _record_sink(self, call: ast.Call) -> None:
+        path_call = self.execution.path_filesystem_calls.get(id(call))
+        imports = self.execution.imports_for(call)
+        name = _qualified_name(call.func, imports)
+        capability: Capability | None
+        if path_call is not None:
+            symbol, capability = path_call
+        else:
+            capability = _call_capability(call, name, imports)
+            symbol = name
+        if capability not in {Capability.FILESYSTEM_READ, Capability.FILESYSTEM_WRITE}:
+            return
+        value = self._sink_value(call)
+        if not value.sources or value.tokens <= self.guarded:
+            return
+        self.result.sinks.append(
+            _PathSinkFlow(
+                value.sources,
+                Evidence(
+                    self.record.source_file,
+                    _line_number(call),
+                    symbol or _display_name(call.func, imports),
+                    "path-like tool input reaches this filesystem operation",
+                ),
+            )
+        )
+
+    def _record_expansion(self, call: ast.Call) -> None:
+        imports = self.execution.imports_for(call)
+        name = _qualified_name(call.func, imports)
+        value = _PathValue()
+        if name == "os.path.expanduser" and call.args:
+            value = self._value(call.args[0])
+        elif isinstance(call.func, ast.Attribute) and call.func.attr == "expanduser":
+            value = self._value(call.func.value)
+        self.result.expanded_sources.update(value.sources)
+
+    def _callee_bindings(self, call: ast.Call, callee: FunctionRecord) -> dict[str, _PathValue]:
+        bindings = dict(self.bindings) if id(call) in self.execution.nested_call_ids else {}
+        parameters = [
+            *callee.node.args.posonlyargs,
+            *callee.node.args.args,
+            *callee.node.args.kwonlyargs,
+        ]
+        by_name = {parameter.arg: parameter for parameter in parameters}
+        positional = [*callee.node.args.posonlyargs, *callee.node.args.args]
+        for parameter, argument in zip(positional, call.args, strict=False):
+            if not isinstance(argument, ast.Starred):
+                value = self._value(argument)
+                if value.sources:
+                    bindings[parameter.arg] = value
+        for keyword in call.keywords:
+            if keyword.arg is None or keyword.arg not in by_name:
+                continue
+            value = self._value(keyword.value)
+            if value.sources:
+                bindings[keyword.arg] = value
+        return bindings
+
+    def _follow_call(self, call: ast.Call) -> None:
+        callee = self.execution.call_edges_by_call.get(id(call))
+        if callee is None:
+            return
+        visitor = _PathFlowVisitor(
+            callee,
+            self.project,
+            self._callee_bindings(call, callee),
+            self.guarded,
+            self.result,
+            self.active,
+        )
+        self.guarded.update(visitor.scan())
+
+    def visit_Call(self, node: ast.Call) -> None:
+        self.generic_visit(node)
+        self._record_expansion(node)
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "relative_to":
+            self.guarded.update(self._guard_tokens(node))
+        self._record_sink(node)
+        self._follow_call(node)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self.visit(node.value)
+        self._assign(node.targets, self._value(node.value))
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if node.value is not None:
+            self.visit(node.value)
+            self._assign([node.target], self._value(node.value))
+        else:
+            self._assign([node.target], _PathValue())
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self.visit(node.value)
+        self._assign([node.target], self._value(node.value))
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self.visit(node.target)
+        self.visit(node.value)
+        self._assign([node.target], _PathValue())
+
+    def visit_Delete(self, node: ast.Delete) -> None:
+        self._assign(node.targets, _PathValue())
+
+    def _definition_expressions(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for default in [*node.args.defaults, *node.args.kw_defaults]:
+            if default is not None:
+                self.visit(default)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._definition_expressions(node)
+        self.bindings.pop(node.name, None)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._definition_expressions(node)
+        self.bindings.pop(node.name, None)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        for default in [*node.args.defaults, *node.args.kw_defaults]:
+            if default is not None:
+                self.visit(default)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        for expression in [*node.decorator_list, *node.bases]:
+            self.visit(expression)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+        outer = self._state()
+        for statement in node.body:
+            self.visit(statement)
+        self._restore(outer)
+        self.bindings.pop(node.name, None)
+
+    def _visit_with(self, items: list[ast.withitem], body: list[ast.stmt]) -> None:
+        for item in items:
+            self.visit(item.context_expr)
+            if item.optional_vars is not None:
+                self._assign([item.optional_vars], _PathValue())
+        for statement in body:
+            self.visit(statement)
+
+    def visit_With(self, node: ast.With) -> None:
+        self._visit_with(node.items, node.body)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+        self._visit_with(node.items, node.body)
+
+    def _visit_for(
+        self,
+        iterator: ast.AST,
+        target: ast.AST,
+        body: list[ast.stmt],
+        orelse: list[ast.stmt],
+    ) -> None:
+        self.visit(iterator)
+        before = self._state()
+        target_value = self._derived(iterator, [self._value(iterator)])
+        self._assign([target], target_value)
+        for statement in body:
+            self.visit(statement)
+        body_state = self._state()
+        self._merge_states(before, body_state)
+        for statement in orelse:
+            self.visit(statement)
+
+    def visit_For(self, node: ast.For) -> None:
+        self._visit_for(node.iter, node.target, node.body, node.orelse)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self._visit_for(node.iter, node.target, node.body, node.orelse)
+
+    @staticmethod
+    def _terminates(statements: list[ast.stmt]) -> bool:
+        return bool(statements) and isinstance(statements[-1], (ast.Raise, ast.Return))
+
+    def visit_If(self, node: ast.If) -> None:
+        self.visit(node.test)
+        before = self._state()
+
+        self.guarded.update(self._conditional_guard_tokens(node.test, True))
+        for statement in node.body:
+            self.visit(statement)
+        body_state = self._state()
+
+        self._restore(before)
+        self.guarded.update(self._conditional_guard_tokens(node.test, False))
+        for statement in node.orelse:
+            self.visit(statement)
+        else_state = self._state()
+
+        body_continues = not self._terminates(node.body)
+        else_continues = not self._terminates(node.orelse)
+        if body_continues and else_continues:
+            self._merge_states(body_state, else_state)
+        elif body_continues:
+            self._restore(body_state)
+        elif else_continues:
+            self._restore(else_state)
+        else:
+            self._restore(before)
+
+    def _visit_try(
+        self,
+        body: list[ast.stmt],
+        handlers: list[ast.ExceptHandler],
+        orelse: list[ast.stmt],
+        finalbody: list[ast.stmt],
+    ) -> None:
+        before = self._state()
+        for statement in body:
+            self.visit(statement)
+        for statement in orelse:
+            self.visit(statement)
+        continuing = [] if self._terminates(orelse or body) else [self._state()]
+
+        for handler in handlers:
+            self._restore(before)
+            if handler.type is not None:
+                self.visit(handler.type)
+            if handler.name is not None:
+                self.bindings.pop(handler.name, None)
+            for statement in handler.body:
+                self.visit(statement)
+            if not self._terminates(handler.body):
+                continuing.append(self._state())
+
+        if continuing:
+            merged = continuing[0]
+            for state in continuing[1:]:
+                self._restore(merged)
+                self._merge_states(merged, state)
+                merged = self._state()
+            self._restore(merged)
+        else:
+            self._restore(before)
+        for statement in finalbody:
+            self.visit(statement)
+
+    def visit_Try(self, node: ast.Try) -> None:
+        self._visit_try(node.body, node.handlers, node.orelse, node.finalbody)
+
+    def visit_TryStar(self, node: ast.TryStar) -> None:
+        self._visit_try(node.body, node.handlers, node.orelse, node.finalbody)
+
+    def _visit_comprehension(
+        self,
+        generators: list[ast.comprehension],
+        values: list[ast.AST],
+    ) -> None:
+        outer = self._state()
+        for generator in generators:
+            self.visit(generator.iter)
+            self._assign(
+                [generator.target],
+                self._derived(generator.iter, [self._value(generator.iter)]),
+            )
+            for condition in generator.ifs:
+                self.visit(condition)
+        for value in values:
+            self.visit(value)
+        self._restore(outer)
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension(node.generators, [node.elt])
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension(node.generators, [node.elt])
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension(node.generators, [node.key, node.value])
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        if node.generators:
+            self.visit(node.generators[0].iter)
+
+
+def _path_scope_result(
+    project: ParsedProject,
+    tool: ToolDefinition,
+    path_parameters: set[str],
+) -> _PathScopeResult:
+    result = _PathScopeResult()
+    record = project.functions.get((tool.source_file, tool.function_name))
+    if record is None:
+        return result
+    bindings = {
+        name: _PathValue(frozenset({name}), frozenset({-(index + 1)}))
+        for index, name in enumerate(sorted(path_parameters))
+    }
+    _PathFlowVisitor(record, project, bindings, set(), result, set()).scan()
+    return result
 
 
 def _reads_environment(node: ast.AST, execution: _ExecutionResult) -> bool:
@@ -864,6 +1385,85 @@ def _tainted_environment_to_network(
                 name,
                 "environment-derived data reaches a network call in the same function",
             )
+    return None
+
+
+@dataclass(frozen=True)
+class _StaticPathDefault:
+    value: str
+    expands_home: bool = False
+
+
+def _parameter_default_nodes(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> dict[str, ast.AST]:
+    positional = [*node.args.posonlyargs, *node.args.args]
+    defaults: dict[str, ast.AST] = {
+        argument.arg: default
+        for argument, default in zip(
+            positional[-len(node.args.defaults) :],
+            node.args.defaults,
+            strict=True,
+        )
+    } if node.args.defaults else {}
+    defaults.update(
+        {
+            argument.arg: default
+            for argument, default in zip(
+                node.args.kwonlyargs,
+                node.args.kw_defaults,
+                strict=True,
+            )
+            if default is not None
+        }
+    )
+    return defaults
+
+
+def _static_path_default(
+    node: ast.AST,
+    imports: dict[str, str],
+) -> _StaticPathDefault | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return _StaticPathDefault(node.value)
+    if not isinstance(node, ast.Call):
+        return None
+    name = _qualified_name(node.func, imports)
+    if name == "pathlib.Path.home" and not node.args and not node.keywords:
+        return _StaticPathDefault("~", expands_home=True)
+    if name == "os.path.expanduser" and node.args:
+        value = _static_path_default(node.args[0], imports)
+        return (
+            _StaticPathDefault(value.value, expands_home=True)
+            if value is not None
+            else None
+        )
+    if isinstance(node.func, ast.Attribute) and node.func.attr == "expanduser":
+        value = _static_path_default(node.func.value, imports)
+        return (
+            _StaticPathDefault(value.value, expands_home=True)
+            if value is not None
+            else None
+        )
+    if name == "pathlib.Path" and node.args:
+        return _static_path_default(node.args[0], imports)
+    return None
+
+
+def _dangerous_path_default(
+    node: ast.AST,
+    imports: dict[str, str],
+    expanded_in_body: bool,
+) -> str | None:
+    default = _static_path_default(node, imports)
+    if default is None:
+        return None
+    if default.value and set(default.value) == {"/"}:
+        return "the POSIX filesystem root"
+    if default.value in {"~", "~/"} and (
+        default.expands_home or expanded_in_body
+    ):
+        return "the user's home directory"
     return None
 
 
@@ -986,36 +1586,56 @@ def analyze_contract(
     path_parameters = {
         parameter.name
         for parameter in tool.parameters
-        if parameter.name.lstrip("*").lower() in PATH_PARAMETER_NAMES
+        if _is_path_parameter_name(parameter.name)
     }
     records = reachable_functions(project, tool)
-    if path_parameters and capabilities & {
-        Capability.FILESYSTEM_READ,
-        Capability.FILESYSTEM_WRITE,
-    } and not _has_path_guard(records, project):
-        filesystem_capability = (
-            Capability.FILESYSTEM_WRITE
-            if Capability.FILESYSTEM_WRITE in capabilities
-            else Capability.FILESYSTEM_READ
+    path_scope = _path_scope_result(project, tool, path_parameters)
+    if path_scope.sinks:
+        unguarded_parameters = sorted(
+            source
+            for sink in path_scope.sinks
+            for source in sink.sources
         )
+        evidence = max(
+            path_scope.sinks,
+            key=lambda sink: (
+                sink.evidence.source_file,
+                sink.evidence.line_number,
+                sink.evidence.symbol,
+            ),
+        ).evidence
         findings.append(
             _finding(
                 "MSC103",
                 "Filesystem scope is not constrained",
                 Severity.HIGH,
                 tool,
-                f"Path-like parameter(s) {sorted(path_parameters)} reach filesystem "
+                f"Path-like parameter(s) {sorted(set(unguarded_parameters))} reach filesystem "
                 "operations without a recognized containment check.",
                 "Resolve the candidate path and prove it remains beneath a fixed, "
                 "trusted root before access.",
-                by_capability[filesystem_capability],
+                evidence,
             )
         )
 
+    tool_record = project.functions.get((tool.source_file, tool.function_name))
+    default_nodes = (
+        _parameter_default_nodes(tool_record.node)
+        if tool_record is not None
+        else {}
+    )
     for parameter in tool.parameters:
-        if parameter.name.lstrip("*").lower() not in PATH_PARAMETER_NAMES:
+        if not _is_path_parameter_name(parameter.name):
             continue
-        if parameter.default in {"'/'", '"/"', "'~'", '"~"'}:
+        default_node = default_nodes.get(parameter.name)
+        if default_node is None or tool_record is None:
+            continue
+        dangerous_default = _dangerous_path_default(
+            default_node,
+            tool_record.imports,
+            parameter.name in path_scope.expanded_sources,
+        )
+        if dangerous_default is not None:
             findings.append(
                 _finding(
                     "MSC104",
