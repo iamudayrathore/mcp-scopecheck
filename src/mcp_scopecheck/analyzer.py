@@ -59,6 +59,20 @@ NETWORK_PREFIXES = (
 )
 NETWORK_READ_METHODS = {"get", "head", "options"}
 NETWORK_WRITE_METHODS = {"delete", "patch", "post", "put"}
+NETWORK_CLIENT_METHODS = {
+    "httpx.Client": frozenset(
+        {"delete", "get", "head", "options", "patch", "post", "put", "request", "send", "stream"}
+    ),
+    "httpx.AsyncClient": frozenset(
+        {"delete", "get", "head", "options", "patch", "post", "put", "request", "send", "stream"}
+    ),
+    "requests.Session": frozenset(
+        {"delete", "get", "head", "options", "patch", "post", "put", "request", "send"}
+    ),
+    "requests.sessions.Session": frozenset(
+        {"delete", "get", "head", "options", "patch", "post", "put", "request", "send"}
+    ),
+}
 PROCESS_PREFIXES = ("asyncio.create_subprocess_", "subprocess.")
 PROCESS_CALLS = {"os.popen", "os.system"}
 PATH_GUARDS = {
@@ -179,6 +193,13 @@ def _call_capability(call: ast.Call, name: str) -> Capability | None:
         return Capability.FILESYSTEM_WRITE
     if name == "os.getenv" or name.endswith(".environ.get"):
         return Capability.ENVIRONMENT_READ
+    if name in NETWORK_CLIENT_METHODS:
+        return None
+    for constructor, methods in NETWORK_CLIENT_METHODS.items():
+        instance_prefix = f"{constructor}()."
+        if name.startswith(instance_prefix):
+            method = name.removeprefix(instance_prefix)
+            return Capability.NETWORK_EGRESS if method in methods else None
     if name.startswith(NETWORK_PREFIXES):
         return Capability.NETWORK_EGRESS
     if name in PROCESS_CALLS or name.startswith(PROCESS_PREFIXES):
@@ -189,14 +210,155 @@ def _call_capability(call: ast.Call, name: str) -> Capability | None:
 
 
 def _network_method_kind(symbol: str) -> str:
-    if not symbol.startswith(("aiohttp.", "httpx.", "requests.")):
-        return "unknown"
     method = symbol.rsplit(".", 1)[-1].lower()
     if method in NETWORK_READ_METHODS:
         return "read"
     if method in NETWORK_WRITE_METHODS:
         return "write"
     return "unknown"
+
+
+def _assigned_names(node: ast.AST) -> set[str]:
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, (ast.List, ast.Tuple)):
+        return {
+            name
+            for item in node.elts
+            for name in _assigned_names(item)
+        }
+    return set()
+
+
+class _ClientBindingVisitor(ast.NodeVisitor):
+    """Track a narrow set of proven network-client names in statement order."""
+
+    def __init__(self, imports: dict[str, str]) -> None:
+        self.imports = imports
+        self.bindings: dict[str, str] = {}
+        self.network_calls: list[tuple[ast.Call, str]] = []
+
+    def scan(self, statements: list[ast.stmt]) -> list[tuple[ast.Call, str]]:
+        for statement in statements:
+            self.visit(statement)
+        return self.network_calls
+
+    def _binding_from_value(self, value: ast.AST) -> str | None:
+        if isinstance(value, ast.Name):
+            return self.bindings.get(value.id)
+        if not isinstance(value, ast.Call):
+            return None
+        constructor = _qualified_name(value.func, self.imports)
+        return constructor if constructor in NETWORK_CLIENT_METHODS else None
+
+    def _update_targets(self, targets: Iterable[ast.AST], binding: str | None) -> None:
+        for target in targets:
+            for name in _assigned_names(target):
+                if binding is None:
+                    self.bindings.pop(name, None)
+                else:
+                    self.bindings[name] = binding
+
+    def _instance_symbol(self, call: ast.Call) -> str | None:
+        if not isinstance(call.func, ast.Attribute):
+            return None
+        method = call.func.attr
+        receiver = call.func.value
+        if isinstance(receiver, ast.Name):
+            constructor = self.bindings.get(receiver.id)
+            if constructor and method in NETWORK_CLIENT_METHODS[constructor]:
+                return f"{receiver.id}.{method}"
+            return None
+        if isinstance(receiver, ast.Call):
+            constructor = _qualified_name(receiver.func, self.imports)
+            if (
+                constructor in NETWORK_CLIENT_METHODS
+                and method in NETWORK_CLIENT_METHODS[constructor]
+            ):
+                return f"{constructor}().{method}"
+        return None
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self.visit(node.value)
+        self._update_targets(node.targets, self._binding_from_value(node.value))
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if node.value is not None:
+            self.visit(node.value)
+        binding = self._binding_from_value(node.value) if node.value is not None else None
+        self._update_targets([node.target], binding)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self.visit(node.value)
+        self._update_targets([node.target], self._binding_from_value(node.value))
+
+    def visit_Delete(self, node: ast.Delete) -> None:
+        self._update_targets(node.targets, None)
+
+    def _visit_for(
+        self,
+        iterator: ast.AST,
+        target: ast.AST,
+        body: list[ast.stmt],
+        orelse: list[ast.stmt],
+    ) -> None:
+        self.visit(iterator)
+        self._update_targets([target], None)
+        for statement in [*body, *orelse]:
+            self.visit(statement)
+
+    def visit_For(self, node: ast.For) -> None:
+        self._visit_for(node.iter, node.target, node.body, node.orelse)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self._visit_for(node.iter, node.target, node.body, node.orelse)
+
+    def _visit_with(self, items: list[ast.withitem], body: list[ast.stmt]) -> None:
+        for item in items:
+            self.visit(item.context_expr)
+            if item.optional_vars is not None:
+                self._update_targets(
+                    [item.optional_vars],
+                    self._binding_from_value(item.context_expr),
+                )
+        for statement in body:
+            self.visit(statement)
+
+    def visit_With(self, node: ast.With) -> None:
+        self._visit_with(node.items, node.body)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+        self._visit_with(node.items, node.body)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.bindings.pop(node.name, None)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.bindings.pop(node.name, None)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.bindings.pop(node.name, None)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for item in node.names:
+            self.bindings.pop(item.asname or item.name.split(".")[0], None)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for item in node.names:
+            self.bindings.pop(item.asname or item.name, None)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        symbol = self._instance_symbol(node)
+        if symbol is not None:
+            self.network_calls.append((node, symbol))
+        self.generic_visit(node)
+
+
+def _instance_network_calls(record: FunctionRecord) -> list[tuple[ast.Call, str]]:
+    return _ClientBindingVisitor(record.imports).scan(record.node.body)
 
 
 def _environment_subscript(node: ast.Subscript, imports: dict[str, str]) -> bool:
@@ -217,12 +379,21 @@ def analyze_capabilities(
     observed: list[ObservedCapability] = []
     seen: set[tuple[Capability, str, int, str]] = set()
     for record in reachable_functions(project, tool):
+        instance_network_calls = {
+            id(call): symbol
+            for call, symbol in _instance_network_calls(record)
+        }
         for node in ast.walk(record.node):
             capability: Capability | None = None
             symbol = ""
             if isinstance(node, ast.Call):
-                symbol = _qualified_name(node.func, record.imports)
-                capability = _call_capability(node, symbol)
+                instance_symbol = instance_network_calls.get(id(node))
+                if instance_symbol is not None:
+                    symbol = instance_symbol
+                    capability = Capability.NETWORK_EGRESS
+                else:
+                    symbol = _qualified_name(node.func, record.imports)
+                    capability = _call_capability(node, symbol)
             elif isinstance(node, ast.Subscript) and _environment_subscript(node, record.imports):
                 symbol = _qualified_name(node.value, record.imports)
                 capability = Capability.ENVIRONMENT_READ
@@ -292,6 +463,10 @@ def _source_position(node: ast.AST) -> tuple[int, int, int]:
 
 def _tainted_environment_to_network(record: FunctionRecord) -> Evidence | None:
     tainted: set[str] = set()
+    instance_network_calls = {
+        id(call): symbol
+        for call, symbol in _instance_network_calls(record)
+    }
     for node in sorted(ast.walk(record.node), key=_source_position):
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             value = node.value
@@ -309,8 +484,13 @@ def _tainted_environment_to_network(record: FunctionRecord) -> Evidence | None:
 
         if not isinstance(node, ast.Call):
             continue
-        name = _qualified_name(node.func, record.imports)
-        if _call_capability(node, name) != Capability.NETWORK_EGRESS:
+        name = instance_network_calls.get(id(node))
+        if name is None:
+            name = _qualified_name(node.func, record.imports)
+        if (
+            id(node) not in instance_network_calls
+            and _call_capability(node, name) != Capability.NETWORK_EGRESS
+        ):
             continue
         if _names(node) & tainted or _reads_environment(node, record.imports):
             return Evidence(

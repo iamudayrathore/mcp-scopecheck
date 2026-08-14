@@ -99,7 +99,7 @@ v0.1 intentionally supports:
 - Local Python files/directories
 - Module-level `@mcp.tool`, `@mcp.tool()`, and equivalent `.tool` decorators
 - Same-file helper-call reachability
-- Direct standard-library and common HTTP-client sinks
+- Direct module calls and flow-proven `httpx.Client`, `httpx.AsyncClient`, and `requests.Session` request sinks
 
 It does **not** yet prove:
 
@@ -110,7 +110,7 @@ It does **not** yet prove:
 - Whether all observed data actually leaves the process, except the narrow same-function flow implemented by `MSC105`
 - Safety of a running MCP server
 
-`MSC103` requires a recognized containment comparison; `.resolve()` by itself is only normalization and does not suppress the finding. `MSC105` follows direct and simple assignment propagation in lexical order within one function, but it does not model complete Python control flow.
+`MSC103` requires a recognized containment comparison; `.resolve()` by itself is only normalization and does not suppress the finding. `MSC105` follows direct environment reads, simple value assignments, and proven local HTTP-client bindings in lexical order within one function. Client aliases are limited to direct name-to-name assignment; ScopeCheck does not model complete Python control flow or general points-to relationships.
 
 A clean report is not proof of safe runtime behavior. See [architecture and threat model](docs/architecture.md).
 

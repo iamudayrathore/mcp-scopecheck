@@ -89,4 +89,11 @@ methods remain network capabilities but are not guessed to be writes.
 
 `MSC103` requires a recognized containment comparison such as `relative_to`, `is_relative_to`, or `commonpath`; path normalization with `resolve()` alone is not treated as containment. The rule still does not prove that a guard dominates a filesystem sink or compares against the correct trusted root.
 
-`MSC105` follows direct environment reads and simple name-to-name or payload assignments in lexical order within one reachable function. It is not control-flow-sensitive, interprocedural, field-sensitive, or a general taint engine.
+`MSC105` follows direct environment reads and simple name-to-name or payload
+assignments in lexical order within one reachable function. Network sinks include
+supported module calls and methods on flow-proven `httpx.Client`,
+`httpx.AsyncClient`, and `requests.Session` bindings. Plain and annotated
+assignments, sync/async context managers, direct aliases, reassignment, deletion,
+and basic name shadowing update those bindings in statement order. Constructing a
+client is not egress. This is not full control-flow, points-to, interprocedural,
+or field-sensitive taint analysis.
