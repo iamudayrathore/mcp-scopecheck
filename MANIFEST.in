@@ -1,19 +1,14 @@
 include CHANGELOG.md
-include CHECKLIST.md
 include CONTRIBUTING.md
 include LICENSE
 include README.md
 include SECURITY.md
 include requirements-dev.txt
 include docs/architecture.md
-include docs/positioning.md
+include docs/review-checklist.md
 include docs/release-notes-v0.1.0.md
 include docs/release-notes-v0.1.1.md
 recursive-include examples *.py
 include scripts/preflight.sh
 include scripts/demo.sh
 recursive-include tests *.py *.txt
-
-# Internal workflow files (AGENTS.md, CODEX_HANDOVER.md, PLANS.md, RELEASE.md,
-# docs/status.md, docs/decisions.md, and docs/validation-*.md) are intentionally
-# absent from this positive public-file list.

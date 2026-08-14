@@ -83,6 +83,8 @@ Every audit is organized around:
 - **Side effects** — filesystem, environment, network, process, and dynamic-code capabilities reachable from each tool.
 - **Snapshot** — a deterministic SHA-256 digest of the extracted contract and capabilities.
 
+For a broader manual review, use the [5-S pre-install checklist](docs/review-checklist.md).
+
 ## Current boundaries
 
 v0.1 intentionally supports:
