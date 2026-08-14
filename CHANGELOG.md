@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.1 - 2026-08-12
+## 0.1.1 - 2026-08-13
 
 - Updated repository metadata for the `iamudayrathore` GitHub owner identity.
 - Added a manual, tag-verified PyPI Trusted Publishing workflow.

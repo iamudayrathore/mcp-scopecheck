@@ -1,6 +1,31 @@
 # MCP ScopeCheck
 
+[![PyPI version](https://img.shields.io/pypi/v/mcp-scopecheck.svg)](https://pypi.org/project/mcp-scopecheck/)
+[![Python versions](https://img.shields.io/pypi/pyversions/mcp-scopecheck.svg)](https://pypi.org/project/mcp-scopecheck/)
+[![CI](https://github.com/iamudayrathore/mcp-scopecheck/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/iamudayrathore/mcp-scopecheck/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/iamudayrathore/mcp-scopecheck/blob/main/LICENSE)
+
 **Inspect before you connect.** MCP ScopeCheck is a pre-install static auditor that compares a Python MCP tool's declared contract with security-relevant behavior reachable from its source—without importing or running the server.
+
+## Quick start
+
+Python 3.11 or newer is required. Install the dependency-free scanner from PyPI:
+
+```bash
+python -m pip install mcp-scopecheck
+```
+
+For an isolated CLI installation, `pipx` is also supported:
+
+```bash
+pipx install mcp-scopecheck
+```
+
+Audit a local Python file or directory:
+
+```bash
+mcp-scopecheck audit examples/unsafe_docs_server
+```
 
 ```console
 $ mcp-scopecheck audit examples/unsafe_docs_server
@@ -15,7 +40,15 @@ $ mcp-scopecheck audit examples/unsafe_docs_server
 
 The paired hardened fixture retains its intended filesystem-read capability but returns `Findings (0)` and exits `0`.
 
-> Status: v0.1.x vertical slice. v0.1.1 corrects repository identity and release automation without changing scanner behavior.
+Exit codes are stable for local and CI use:
+
+| Code | Meaning |
+| ---: | --- |
+| `0` | No finding met the configured threshold |
+| `1` | One or more findings met the configured threshold |
+| `2` | Invalid input, no supported tools, diagnostics, or another audit error |
+
+Use `--fail-on high` (or `low`, `medium`, or `critical`) to set the exit-`1` threshold.
 
 ## Why this exists
 
@@ -30,33 +63,6 @@ That focus complements manifest scanners and runtime testing tools. It does not 
 ## Security invariant
 
 ScopeCheck reads source as text and parses it with Python's `ast` module. Target modules are never imported, decorators are never invoked, and MCP servers are never started. A regression test places a real top-level side effect in a fixture and proves it does not execute during an audit.
-
-## Install from source
-
-Python 3.11 or newer is required. The scanner has no runtime dependencies.
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e .
-```
-
-## Use
-
-```bash
-mcp-scopecheck audit examples/unsafe_docs_server
-mcp-scopecheck audit examples/hardened_docs_server
-```
-
-Audit any local Python file or directory by replacing the target path. Use `--fail-on high` (or `low`, `medium`, or `critical`) to set the exit-`1` threshold.
-
-Exit codes:
-
-| Code | Meaning |
-| ---: | --- |
-| `0` | No finding met the configured threshold |
-| `1` | One or more findings met the configured threshold |
-| `2` | Invalid input, no supported tools, diagnostics, or another audit error |
 
 ## What v0.1 detects
 
@@ -109,11 +115,12 @@ A clean report is not proof of safe runtime behavior. See [architecture and thre
 
 ## Develop
 
-The test suite uses only the Python standard library. Release tooling is development-only and pinned in `requirements-dev.txt`:
+For an editable source installation, create a virtual environment and install the pinned development tools. The test suite uses only the Python standard library, and the installed scanner still has no runtime dependencies.
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install --disable-pip-version-check -r requirements-dev.txt
+.venv/bin/python -m pip install --no-deps -e .
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 PYTHONPATH=src .venv/bin/python -m mcp_scopecheck audit examples/unsafe_docs_server
 PYTHONPATH=src .venv/bin/python -m mcp_scopecheck audit examples/hardened_docs_server
