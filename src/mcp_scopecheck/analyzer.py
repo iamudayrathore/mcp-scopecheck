@@ -6,6 +6,7 @@ import ast
 import re
 from collections import deque
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 
 from .models import (
     Capability,
@@ -137,20 +138,29 @@ def _qualified_name(node: ast.AST, imports: dict[str, str]) -> str:
         return imports.get(node.id, node.id)
     if isinstance(node, ast.Attribute):
         prefix = _qualified_name(node.value, imports)
-        return f"{prefix}.{node.attr}" if prefix else node.attr
+        return f"{prefix}.{node.attr}" if prefix else ""
     if isinstance(node, ast.Call):
         prefix = _qualified_name(node.func, imports)
         return f"{prefix}()" if prefix else ""
     return ""
 
 
+def _display_name(node: ast.AST, imports: dict[str, str]) -> str:
+    """Return a readable symbol while preserving unresolved local receivers."""
+
+    if isinstance(node, ast.Name):
+        return imports.get(node.id) or node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _display_name(node.value, imports)
+        return f"{prefix}.{node.attr}" if prefix else node.attr
+    if isinstance(node, ast.Call):
+        prefix = _display_name(node.func, imports)
+        return f"{prefix}()" if prefix else ""
+    return ""
+
+
 def _local_calls(record: FunctionRecord, project: ParsedProject) -> Iterable[FunctionRecord]:
-    for node in ast.walk(record.node):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
-            continue
-        target = project.functions.get((record.source_file, node.func.id))
-        if target is not None:
-            yield target
+    yield from _execution(record, project).call_edges
 
 
 def reachable_functions(project: ParsedProject, tool: ToolDefinition) -> list[FunctionRecord]:
@@ -160,11 +170,11 @@ def reachable_functions(project: ParsedProject, tool: ToolDefinition) -> list[Fu
     if root is None:
         return []
     queue: deque[FunctionRecord] = deque([root])
-    visited: set[tuple[str, str]] = set()
+    visited: set[int] = set()
     records: list[FunctionRecord] = []
     while queue:
         record = queue.popleft()
-        key = (record.source_file, record.node.name)
+        key = id(record.node)
         if key in visited:
             continue
         visited.add(key)
@@ -269,47 +279,166 @@ def _assigned_names(node: ast.AST) -> set[str]:
     return set()
 
 
-class _ClientBindingVisitor(ast.NodeVisitor):
-    """Track a narrow set of proven network-client names in statement order."""
+@dataclass
+class _ExecutionResult:
+    """Executable nodes and lexical resolutions for one function body."""
 
-    def __init__(self, imports: dict[str, str]) -> None:
-        self.imports = imports
-        self.bindings: dict[str, str] = {}
-        self.network_calls: list[tuple[ast.Call, str]] = []
+    nodes: list[ast.AST] = field(default_factory=list)
+    events: list[ast.AST] = field(default_factory=list)
+    visited_ids: set[int] = field(default_factory=set)
+    imports_by_node: dict[int, dict[str, str]] = field(default_factory=dict)
+    call_edges: list[FunctionRecord] = field(default_factory=list)
+    instance_network_calls: dict[int, str] = field(default_factory=dict)
+    path_filesystem_calls: dict[int, tuple[str, Capability]] = field(default_factory=dict)
 
-    def scan(self, statements: list[ast.stmt]) -> list[tuple[ast.Call, str]]:
-        for statement in statements:
+    def imports_for(self, node: ast.AST) -> dict[str, str]:
+        return self.imports_by_node.get(id(node), {})
+
+
+@dataclass
+class _BindingState:
+    imports: dict[str, str]
+    paths: set[str]
+    clients: dict[str, str]
+    nested: dict[str, ast.FunctionDef | ast.AsyncFunctionDef]
+
+
+def _parameter_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    arguments = node.args
+    names = {
+        argument.arg
+        for argument in [
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
+        ]
+    }
+    if arguments.vararg is not None:
+        names.add(arguments.vararg.arg)
+    if arguments.kwarg is not None:
+        names.add(arguments.kwarg.arg)
+    return names
+
+
+class _ExecutionVisitor(ast.NodeVisitor):
+    """Follow executable lexical scopes without importing target code."""
+
+    def __init__(self, record: FunctionRecord, project: ParsedProject) -> None:
+        self.record = record
+        self.project = project
+        self.imports = dict(record.imports)
+        self.paths = set(record.path_bindings)
+        self.clients = dict(record.client_bindings)
+        self.nested: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+        self.result = _ExecutionResult()
+        for name in _parameter_names(record.node):
+            self._shadow_name(name)
+
+    def scan(self) -> _ExecutionResult:
+        for statement in self.record.node.body:
             self.visit(statement)
-        return self.network_calls
+        return self.result
 
-    def _binding_from_value(self, value: ast.AST) -> str | None:
-        if isinstance(value, ast.Name):
-            return self.bindings.get(value.id)
-        if not isinstance(value, ast.Call):
-            return None
-        constructor = _qualified_name(value.func, self.imports)
-        return constructor if constructor in NETWORK_CLIENT_METHODS else None
+    def _remember(self, node: ast.AST, *, event: bool = False) -> None:
+        self.result.nodes.append(node)
+        self.result.visited_ids.add(id(node))
+        self.result.imports_by_node[id(node)] = dict(self.imports)
+        if event:
+            self.result.events.append(node)
 
-    def _update_targets(self, targets: Iterable[ast.AST], binding: str | None) -> None:
+    def _shadow_name(self, name: str) -> None:
+        self.imports[name] = ""
+        self.paths.discard(name)
+        self.clients.pop(name, None)
+        self.nested.pop(name, None)
+
+    def _update_targets(
+        self,
+        targets: Iterable[ast.AST],
+        *,
+        is_path: bool = False,
+        client: str | None = None,
+    ) -> None:
         for target in targets:
             for name in _assigned_names(target):
-                if binding is None:
-                    self.bindings.pop(name, None)
-                else:
-                    self.bindings[name] = binding
+                self._shadow_name(name)
+                if is_path:
+                    self.paths.add(name)
+                if client is not None:
+                    self.clients[name] = client
 
-    def _instance_symbol(self, call: ast.Call) -> str | None:
+    def _imports_for_value(self, value: ast.AST) -> dict[str, str]:
+        return self.result.imports_by_node.get(id(value), self.imports)
+
+    def _client_from_value(self, value: ast.AST) -> str | None:
+        if isinstance(value, ast.Name):
+            return self.clients.get(value.id)
+        if not isinstance(value, ast.Call):
+            return None
+        constructor = _qualified_name(value.func, self._imports_for_value(value))
+        return constructor if constructor in NETWORK_CLIENT_METHODS else None
+
+    def _is_path_value(
+        self,
+        value: ast.AST,
+        imports: dict[str, str] | None = None,
+    ) -> bool:
+        resolved_imports = imports or self._imports_for_value(value)
+        if isinstance(value, ast.Name):
+            return value.id in self.paths
+        if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Div):
+            return self._is_path_value(value.left, resolved_imports)
+        if isinstance(value, ast.Attribute) and value.attr == "parent":
+            return self._is_path_value(value.value, resolved_imports)
+        if not isinstance(value, ast.Call):
+            return False
+        if _qualified_name(value.func, resolved_imports) == "pathlib.Path":
+            return True
+        return (
+            isinstance(value.func, ast.Attribute)
+            and value.func.attr in PATH_RETURNING_METHODS
+            and self._is_path_value(value.func.value, resolved_imports)
+        )
+
+    def _path_call(
+        self,
+        call: ast.Call,
+        imports: dict[str, str],
+    ) -> tuple[str, Capability] | None:
+        if not isinstance(call.func, ast.Attribute):
+            return None
+        if not self._is_path_value(call.func.value, imports):
+            return None
+        method = call.func.attr
+        symbol = _display_name(call.func, imports)
+        if method in PATH_READ_METHODS:
+            return symbol, Capability.FILESYSTEM_READ
+        if method in PATH_WRITE_METHODS:
+            return symbol, Capability.FILESYSTEM_WRITE
+        if method == "open":
+            return symbol, _mode_capability(call, 0)
+        return None
+
+    def _path_iterator(self, value: ast.AST) -> bool:
+        return (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr in {"glob", "iterdir", "rglob"}
+            and self._is_path_value(value.func.value, self._imports_for_value(value))
+        )
+
+    def _instance_symbol(self, call: ast.Call, imports: dict[str, str]) -> str | None:
         if not isinstance(call.func, ast.Attribute):
             return None
         method = call.func.attr
         receiver = call.func.value
         if isinstance(receiver, ast.Name):
-            constructor = self.bindings.get(receiver.id)
+            constructor = self.clients.get(receiver.id)
             if constructor and method in NETWORK_CLIENT_METHODS[constructor]:
                 return f"{receiver.id}.{method}"
             return None
         if isinstance(receiver, ast.Call):
-            constructor = _qualified_name(receiver.func, self.imports)
+            constructor = _qualified_name(receiver.func, imports)
             if (
                 constructor in NETWORK_CLIENT_METHODS
                 and method in NETWORK_CLIENT_METHODS[constructor]
@@ -317,40 +446,182 @@ class _ClientBindingVisitor(ast.NodeVisitor):
                 return f"{constructor}().{method}"
         return None
 
+    def _nested_record(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> FunctionRecord:
+        return FunctionRecord(
+            self.record.source_file,
+            node,
+            dict(self.imports),
+            frozenset(self.paths),
+            dict(self.clients),
+        )
+
+    def _direct_call_edge(self, call: ast.Call) -> FunctionRecord | None:
+        if not isinstance(call.func, ast.Name):
+            return None
+        name = call.func.id
+        nested = self.nested.get(name)
+        if nested is not None:
+            return self._nested_record(nested)
+        if name in self.imports:
+            return None
+        return self.project.functions.get((self.record.source_file, name))
+
+    def _state(self) -> _BindingState:
+        return _BindingState(
+            dict(self.imports),
+            set(self.paths),
+            dict(self.clients),
+            dict(self.nested),
+        )
+
+    def _restore(self, state: _BindingState) -> None:
+        self.imports = dict(state.imports)
+        self.paths = set(state.paths)
+        self.clients = dict(state.clients)
+        self.nested = dict(state.nested)
+
+    def _merge_states(self, first: _BindingState, second: _BindingState) -> None:
+        missing = object()
+        imports: dict[str, str] = {}
+        for name in first.imports.keys() | second.imports.keys():
+            first_value = first.imports.get(name, missing)
+            second_value = second.imports.get(name, missing)
+            if first_value == second_value and first_value is not missing:
+                imports[name] = first_value  # type: ignore[assignment]
+            elif first_value != second_value:
+                imports[name] = ""
+        clients = {
+            name: constructor
+            for name, constructor in first.clients.items()
+            if second.clients.get(name) == constructor
+        }
+        nested = {
+            name: function
+            for name, function in first.nested.items()
+            if second.nested.get(name) is function
+        }
+        self.imports = imports
+        self.paths = first.paths & second.paths
+        self.clients = clients
+        self.nested = nested
+
+    def visit_Name(self, node: ast.Name) -> None:
+        self.result.visited_ids.add(id(node))
+
+    def visit_Call(self, node: ast.Call) -> None:
+        self._remember(node, event=True)
+        imports = self.result.imports_for(node)
+        edge = self._direct_call_edge(node)
+        instance_symbol = self._instance_symbol(node, imports)
+        if instance_symbol is not None:
+            self.result.instance_network_calls[id(node)] = instance_symbol
+        path_call = self._path_call(node, imports)
+        if path_call is not None:
+            self.result.path_filesystem_calls[id(node)] = path_call
+        self.generic_visit(node)
+        if edge is not None:
+            self.result.call_edges.append(edge)
+
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        self._remember(node)
+        self.generic_visit(node)
+
     def visit_Assign(self, node: ast.Assign) -> None:
+        self._remember(node)
         self.visit(node.value)
-        self._update_targets(node.targets, self._binding_from_value(node.value))
+        self.result.events.append(node)
+        self._update_targets(
+            node.targets,
+            is_path=self._is_path_value(node.value),
+            client=self._client_from_value(node.value),
+        )
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self._remember(node)
         if node.value is not None:
             self.visit(node.value)
-        binding = self._binding_from_value(node.value) if node.value is not None else None
-        self._update_targets([node.target], binding)
+        self.result.events.append(node)
+        self._update_targets(
+            [node.target],
+            is_path=node.value is not None and self._is_path_value(node.value),
+            client=self._client_from_value(node.value) if node.value is not None else None,
+        )
 
     def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self._remember(node)
         self.visit(node.value)
-        self._update_targets([node.target], self._binding_from_value(node.value))
+        self.result.events.append(node)
+        self._update_targets(
+            [node.target],
+            is_path=self._is_path_value(node.value),
+            client=self._client_from_value(node.value),
+        )
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self.visit(node.target)
+        self.visit(node.value)
+        self._update_targets([node.target])
 
     def visit_Delete(self, node: ast.Delete) -> None:
-        self._update_targets(node.targets, None)
+        self._update_targets(node.targets)
 
-    def _visit_for(
+    def visit_Import(self, node: ast.Import) -> None:
+        for item in node.names:
+            name = item.asname or item.name.split(".")[0]
+            self._shadow_name(name)
+            self.imports[name] = item.name
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.module is None:
+            return
+        for item in node.names:
+            name = item.asname or item.name
+            self._shadow_name(name)
+            self.imports[name] = f"{node.module}.{item.name}"
+
+    def _definition_expressions(
         self,
-        iterator: ast.AST,
-        target: ast.AST,
-        body: list[ast.stmt],
-        orelse: list[ast.stmt],
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
     ) -> None:
-        self.visit(iterator)
-        self._update_targets([target], None)
-        for statement in [*body, *orelse]:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for default in [*node.args.defaults, *node.args.kw_defaults]:
+            if default is not None:
+                self.visit(default)
+
+    def _visit_function_definition(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> None:
+        self._definition_expressions(node)
+        self._shadow_name(node.name)
+        self.nested[node.name] = node
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function_definition(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function_definition(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        for default in [*node.args.defaults, *node.args.kw_defaults]:
+            if default is not None:
+                self.visit(default)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        for expression in [*node.decorator_list, *node.bases]:
+            self.visit(expression)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+        outer = self._state()
+        self.nested = {}
+        for statement in node.body:
             self.visit(statement)
-
-    def visit_For(self, node: ast.For) -> None:
-        self._visit_for(node.iter, node.target, node.body, node.orelse)
-
-    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
-        self._visit_for(node.iter, node.target, node.body, node.orelse)
+        self._restore(outer)
+        self._shadow_name(node.name)
 
     def _visit_with(self, items: list[ast.withitem], body: list[ast.stmt]) -> None:
         for item in items:
@@ -358,7 +629,8 @@ class _ClientBindingVisitor(ast.NodeVisitor):
             if item.optional_vars is not None:
                 self._update_targets(
                     [item.optional_vars],
-                    self._binding_from_value(item.context_expr),
+                    is_path=self._is_path_value(item.context_expr),
+                    client=self._client_from_value(item.context_expr),
                 )
         for statement in body:
             self.visit(statement)
@@ -369,114 +641,6 @@ class _ClientBindingVisitor(ast.NodeVisitor):
     def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
         self._visit_with(node.items, node.body)
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self.bindings.pop(node.name, None)
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        self.bindings.pop(node.name, None)
-
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        self.bindings.pop(node.name, None)
-
-    def visit_Lambda(self, node: ast.Lambda) -> None:
-        return
-
-    def visit_Import(self, node: ast.Import) -> None:
-        for item in node.names:
-            self.bindings.pop(item.asname or item.name.split(".")[0], None)
-
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        for item in node.names:
-            self.bindings.pop(item.asname or item.name, None)
-
-    def visit_Call(self, node: ast.Call) -> None:
-        symbol = self._instance_symbol(node)
-        if symbol is not None:
-            self.network_calls.append((node, symbol))
-        self.generic_visit(node)
-
-
-def _instance_network_calls(record: FunctionRecord) -> list[tuple[ast.Call, str]]:
-    return _ClientBindingVisitor(record.imports).scan(record.node.body)
-
-
-class _PathBindingVisitor(ast.NodeVisitor):
-    """Classify pathlib operations only on statically proven Path values."""
-
-    def __init__(self, record: FunctionRecord) -> None:
-        self.imports = record.imports
-        self.bindings = set(record.path_bindings)
-        self.filesystem_calls: list[tuple[ast.Call, str, Capability]] = []
-
-    def scan(self, statements: list[ast.stmt]) -> list[tuple[ast.Call, str, Capability]]:
-        for statement in statements:
-            self.visit(statement)
-        return self.filesystem_calls
-
-    def _is_path_value(self, value: ast.AST) -> bool:
-        if isinstance(value, ast.Name):
-            return value.id in self.bindings
-        if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Div):
-            return self._is_path_value(value.left)
-        if isinstance(value, ast.Attribute) and value.attr == "parent":
-            return self._is_path_value(value.value)
-        if not isinstance(value, ast.Call):
-            return False
-        if _qualified_name(value.func, self.imports) == "pathlib.Path":
-            return True
-        return (
-            isinstance(value.func, ast.Attribute)
-            and value.func.attr in PATH_RETURNING_METHODS
-            and self._is_path_value(value.func.value)
-        )
-
-    def _update_targets(self, targets: Iterable[ast.AST], is_path: bool) -> None:
-        for target in targets:
-            for name in _assigned_names(target):
-                self.bindings.discard(name)
-                if is_path:
-                    self.bindings.add(name)
-
-    def _path_call(self, call: ast.Call) -> tuple[str, Capability] | None:
-        if not isinstance(call.func, ast.Attribute):
-            return None
-        if not self._is_path_value(call.func.value):
-            return None
-        method = call.func.attr
-        symbol = _qualified_name(call.func, self.imports)
-        if method in PATH_READ_METHODS:
-            return symbol, Capability.FILESYSTEM_READ
-        if method in PATH_WRITE_METHODS:
-            return symbol, Capability.FILESYSTEM_WRITE
-        if method == "open":
-            return symbol, _mode_capability(call, 0)
-        return None
-
-    def _is_path_iterator(self, value: ast.AST) -> bool:
-        return (
-            isinstance(value, ast.Call)
-            and isinstance(value.func, ast.Attribute)
-            and value.func.attr in {"glob", "iterdir", "rglob"}
-            and self._is_path_value(value.func.value)
-        )
-
-    def visit_Assign(self, node: ast.Assign) -> None:
-        self.visit(node.value)
-        self._update_targets(node.targets, self._is_path_value(node.value))
-
-    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-        if node.value is not None:
-            self.visit(node.value)
-        is_path = node.value is not None and self._is_path_value(node.value)
-        self._update_targets([node.target], is_path)
-
-    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
-        self.visit(node.value)
-        self._update_targets([node.target], self._is_path_value(node.value))
-
-    def visit_Delete(self, node: ast.Delete) -> None:
-        self._update_targets(node.targets, False)
-
     def _visit_for(
         self,
         iterator: ast.AST,
@@ -485,8 +649,13 @@ class _PathBindingVisitor(ast.NodeVisitor):
         orelse: list[ast.stmt],
     ) -> None:
         self.visit(iterator)
-        self._update_targets([target], self._is_path_iterator(iterator))
-        for statement in [*body, *orelse]:
+        before_body = self._state()
+        self._update_targets([target], is_path=self._path_iterator(iterator))
+        for statement in body:
+            self.visit(statement)
+        after_body = self._state()
+        self._merge_states(before_body, after_body)
+        for statement in orelse:
             self.visit(statement)
 
     def visit_For(self, node: ast.For) -> None:
@@ -495,38 +664,49 @@ class _PathBindingVisitor(ast.NodeVisitor):
     def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
         self._visit_for(node.iter, node.target, node.body, node.orelse)
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self.bindings.discard(node.name)
+    def visit_If(self, node: ast.If) -> None:
+        self.visit(node.test)
+        before = self._state()
+        for statement in node.body:
+            self.visit(statement)
+        body_state = self._state()
+        self._restore(before)
+        for statement in node.orelse:
+            self.visit(statement)
+        else_state = self._state()
+        self._merge_states(body_state, else_state)
 
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        self.bindings.discard(node.name)
+    def _visit_comprehension(
+        self,
+        generators: list[ast.comprehension],
+        values: list[ast.AST],
+    ) -> None:
+        outer = self._state()
+        for generator in generators:
+            self.visit(generator.iter)
+            self._update_targets([generator.target])
+            for condition in generator.ifs:
+                self.visit(condition)
+        for value in values:
+            self.visit(value)
+        self._restore(outer)
 
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        self.bindings.discard(node.name)
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension(node.generators, [node.elt])
 
-    def visit_Lambda(self, node: ast.Lambda) -> None:
-        return
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension(node.generators, [node.elt])
 
-    def visit_Import(self, node: ast.Import) -> None:
-        for item in node.names:
-            self.bindings.discard(item.asname or item.name.split(".")[0])
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension(node.generators, [node.key, node.value])
 
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        for item in node.names:
-            self.bindings.discard(item.asname or item.name)
-
-    def visit_Call(self, node: ast.Call) -> None:
-        path_call = self._path_call(node)
-        if path_call is not None:
-            symbol, capability = path_call
-            self.filesystem_calls.append((node, symbol, capability))
-        self.generic_visit(node)
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        if node.generators:
+            self.visit(node.generators[0].iter)
 
 
-def _path_filesystem_calls(
-    record: FunctionRecord,
-) -> list[tuple[ast.Call, str, Capability]]:
-    return _PathBindingVisitor(record).scan(record.node.body)
+def _execution(record: FunctionRecord, project: ParsedProject) -> _ExecutionResult:
+    return _ExecutionVisitor(record, project).scan()
 
 
 def _environment_subscript(node: ast.Subscript, imports: dict[str, str]) -> bool:
@@ -547,30 +727,27 @@ def analyze_capabilities(
     observed: list[ObservedCapability] = []
     seen: set[tuple[Capability, str, int, str]] = set()
     for record in reachable_functions(project, tool):
-        instance_network_calls = {
-            id(call): symbol
-            for call, symbol in _instance_network_calls(record)
-        }
-        path_filesystem_calls = {
-            id(call): (symbol, capability)
-            for call, symbol, capability in _path_filesystem_calls(record)
-        }
-        for node in ast.walk(record.node):
+        execution = _execution(record, project)
+        for node in execution.nodes:
             capability: Capability | None = None
             symbol = ""
             if isinstance(node, ast.Call):
-                instance_symbol = instance_network_calls.get(id(node))
-                path_call = path_filesystem_calls.get(id(node))
+                imports = execution.imports_for(node)
+                instance_symbol = execution.instance_network_calls.get(id(node))
+                path_call = execution.path_filesystem_calls.get(id(node))
                 if path_call is not None:
                     symbol, capability = path_call
                 elif instance_symbol is not None:
                     symbol = instance_symbol
                     capability = Capability.NETWORK_EGRESS
                 else:
-                    symbol = _qualified_name(node.func, record.imports)
-                    capability = _call_capability(node, symbol, record.imports)
-            elif isinstance(node, ast.Subscript) and _environment_subscript(node, record.imports):
-                symbol = _qualified_name(node.value, record.imports)
+                    symbol = _qualified_name(node.func, imports)
+                    capability = _call_capability(node, symbol, imports)
+            elif isinstance(node, ast.Subscript):
+                imports = execution.imports_for(node)
+                if not _environment_subscript(node, imports):
+                    continue
+                symbol = _qualified_name(node.value, imports)
                 capability = Capability.ENVIRONMENT_READ
             if capability is None:
                 continue
@@ -600,57 +777,69 @@ def analyze_capabilities(
     return observed
 
 
-def _has_path_guard(records: Iterable[FunctionRecord]) -> bool:
+def _has_path_guard(
+    records: Iterable[FunctionRecord],
+    project: ParsedProject,
+) -> bool:
     for record in records:
-        for node in ast.walk(record.node):
+        execution = _execution(record, project)
+        for node in execution.nodes:
             if not isinstance(node, ast.Call):
                 continue
-            name = _qualified_name(node.func, record.imports)
+            name = _display_name(node.func, execution.imports_for(node))
             if name in PATH_GUARDS or name.endswith((".is_relative_to", ".relative_to")):
                 return True
     return False
 
 
-def _reads_environment(node: ast.AST, imports: dict[str, str]) -> bool:
+def _reads_environment(node: ast.AST, execution: _ExecutionResult) -> bool:
     return any(
         (
             isinstance(child, ast.Call)
-            and _call_capability(child, _qualified_name(child.func, imports), imports)
+            and id(child) in execution.visited_ids
+            and _call_capability(
+                child,
+                _qualified_name(child.func, execution.imports_for(child)),
+                execution.imports_for(child),
+            )
             == Capability.ENVIRONMENT_READ
         )
-        or (isinstance(child, ast.Subscript) and _environment_subscript(child, imports))
+        or (
+            isinstance(child, ast.Subscript)
+            and id(child) in execution.visited_ids
+            and _environment_subscript(child, execution.imports_for(child))
+        )
         for child in ast.walk(node)
     )
 
 
-def _names(node: ast.AST) -> set[str]:
-    return {child.id for child in ast.walk(node) if isinstance(child, ast.Name)}
-
-
-def _source_position(node: ast.AST) -> tuple[int, int, int]:
-    assignment_first = 0 if isinstance(node, (ast.Assign, ast.AnnAssign)) else 1
-    return (
-        _line_number(node),
-        getattr(node, "col_offset", 0),
-        assignment_first,
-    )
-
-
-def _tainted_environment_to_network(record: FunctionRecord) -> Evidence | None:
-    tainted: set[str] = set()
-    instance_network_calls = {
-        id(call): symbol
-        for call, symbol in _instance_network_calls(record)
+def _names(node: ast.AST, execution: _ExecutionResult) -> set[str]:
+    return {
+        child.id
+        for child in ast.walk(node)
+        if isinstance(child, ast.Name) and id(child) in execution.visited_ids
     }
-    for node in sorted(ast.walk(record.node), key=_source_position):
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+
+
+def _tainted_environment_to_network(
+    record: FunctionRecord,
+    project: ParsedProject,
+) -> Evidence | None:
+    tainted: set[str] = set()
+    execution = _execution(record, project)
+    for node in execution.events:
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
             value = node.value
             if value is None:
                 continue
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            assigned = {name for target in targets for name in _names(target)}
-            value_is_tainted = _reads_environment(value, record.imports) or bool(
-                _names(value) & tainted
+            assigned = {
+                name
+                for target in targets
+                for name in _assigned_names(target)
+            }
+            value_is_tainted = _reads_environment(value, execution) or bool(
+                _names(value, execution) & tainted
             )
             tainted.difference_update(assigned)
             if value_is_tainted:
@@ -659,15 +848,16 @@ def _tainted_environment_to_network(record: FunctionRecord) -> Evidence | None:
 
         if not isinstance(node, ast.Call):
             continue
-        name = instance_network_calls.get(id(node))
+        imports = execution.imports_for(node)
+        name = execution.instance_network_calls.get(id(node))
         if name is None:
-            name = _qualified_name(node.func, record.imports)
+            name = _qualified_name(node.func, imports)
         if (
-            id(node) not in instance_network_calls
-            and _call_capability(node, name, record.imports) != Capability.NETWORK_EGRESS
+            id(node) not in execution.instance_network_calls
+            and _call_capability(node, name, imports) != Capability.NETWORK_EGRESS
         ):
             continue
-        if _names(node) & tainted or _reads_environment(node, record.imports):
+        if _names(node, execution) & tainted or _reads_environment(node, execution):
             return Evidence(
                 record.source_file,
                 _line_number(node),
@@ -802,7 +992,7 @@ def analyze_contract(
     if path_parameters and capabilities & {
         Capability.FILESYSTEM_READ,
         Capability.FILESYSTEM_WRITE,
-    } and not _has_path_guard(records):
+    } and not _has_path_guard(records, project):
         filesystem_capability = (
             Capability.FILESYSTEM_WRITE
             if Capability.FILESYSTEM_WRITE in capabilities
@@ -841,7 +1031,7 @@ def analyze_contract(
             )
 
     for record in records:
-        flow = _tainted_environment_to_network(record)
+        flow = _tainted_environment_to_network(record, project)
         if flow:
             findings.append(
                 _finding(

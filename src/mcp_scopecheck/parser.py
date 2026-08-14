@@ -105,6 +105,7 @@ class FunctionRecord:
     node: ast.FunctionDef | ast.AsyncFunctionDef
     imports: dict[str, str]
     path_bindings: frozenset[str] = frozenset()
+    client_bindings: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -407,6 +408,15 @@ def _imports(tree: ast.Module) -> dict[str, str]:
         elif isinstance(node, ast.ImportFrom) and node.module:
             for item in node.names:
                 aliases[item.asname or item.name] = f"{node.module}.{item.name}"
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    aliases[target.id] = ""
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            aliases.pop(node.name, None)
+        elif isinstance(node, ast.ClassDef):
+            aliases[node.name] = ""
     return aliases
 
 

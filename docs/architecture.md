@@ -59,9 +59,25 @@ Unexpected internal ScopeCheck exceptions are not converted into target errors.
 
 ## Reachability model
 
-The root of analysis is each discovered module-level tool function. Direct calls to named functions in the same file are followed transitively. Calls across modules, aliases assigned at runtime, decorators that register tools dynamically, and higher-order dispatch are outside v0.1.
+The root of analysis is each discovered module-level tool function. Direct calls
+to named functions in the same file and directly bound nested sync/async
+functions are followed transitively. Function-local imports are resolved at the
+call site; parameters, assignments, deletion, and later imports update lexical
+bindings in statement order. At control-flow joins, a module/client/path binding
+is retained only when both analyzed paths agree.
 
-This boundary matters: “reachable” in v0.1 means *reachable under this conservative same-file model*, not reachable under every possible Python execution.
+Defining a nested function or lambda does not make its body reachable. Decorator
+and default expressions are evaluated, while an uncalled nested body is skipped.
+Class-definition bodies are evaluated but method bodies are not. Eager list,
+set, and dictionary comprehensions are traversed in their isolated target scope;
+the deferred body of a generator expression is not assumed to run merely because
+the generator is created.
+
+Calls across modules, calls through function aliases or callbacks, lambda
+invocation, class-method dispatch, and higher-order dispatch are outside v0.1.
+Control-flow handling is a conservative binding join rather than path-sensitive
+program analysis. This boundary matters: “reachable” means *reachable under this
+documented static model*, not reachable under every possible Python execution.
 
 ## Finding philosophy
 
