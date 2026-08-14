@@ -29,6 +29,15 @@ The target is data throughout this flow. Nothing imports the target or invokes i
 - **Trusted:** ScopeCheck's parser, rule engine, renderer, and Python runtime.
 - **External systems:** none during a v0.1 audit. The scanner has no network feature and no runtime dependency.
 
+## Terminal-output boundary
+
+Every target-controlled value passes through one display escaping function before
+it reaches the plain-text report or a normal CLI error. C0 and C1 controls, DEL,
+carriage returns, line feeds, tabs, Unicode line separators, and Unicode
+bidirectional formatting controls are rendered as visible `\uXXXX` sequences.
+Ordinary Unicode remains readable. ScopeCheck does not currently expose a JSON or
+other machine-readable report format.
+
 ## Safety limits
 
 - Symlinked source files are skipped.

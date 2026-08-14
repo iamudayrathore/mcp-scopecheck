@@ -10,7 +10,7 @@ from . import __version__
 from .auditor import audit
 from .models import Severity
 from .parser import ParseTargetError
-from .render import render_report
+from .render import escape_terminal_text, render_report
 
 
 def _severity(value: str) -> Severity:
@@ -51,7 +51,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         report = audit(args.target)
     except (OSError, ParseTargetError) as exc:
-        print(f"mcp-scopecheck: {exc}", file=sys.stderr)
+        print(f"mcp-scopecheck: {escape_terminal_text(exc)}", file=sys.stderr)
         return 2
 
     print(render_report(report))

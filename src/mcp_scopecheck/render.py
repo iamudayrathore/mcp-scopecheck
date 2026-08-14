@@ -4,9 +4,46 @@ from __future__ import annotations
 
 from .models import AuditReport
 
+_BIDI_CONTROLS = frozenset(
+    {
+        "\u061c",  # Arabic letter mark
+        "\u200e",  # Left-to-right mark
+        "\u200f",  # Right-to-left mark
+        "\u202a",  # Left-to-right embedding
+        "\u202b",  # Right-to-left embedding
+        "\u202c",  # Pop directional formatting
+        "\u202d",  # Left-to-right override
+        "\u202e",  # Right-to-left override
+        "\u2066",  # Left-to-right isolate
+        "\u2067",  # Right-to-left isolate
+        "\u2068",  # First-strong isolate
+        "\u2069",  # Pop directional isolate
+    }
+)
+_UNICODE_LINE_CONTROLS = frozenset({"\u2028", "\u2029"})
+
+
+def escape_terminal_text(value: object) -> str:
+    """Render untrusted text without allowing it to control terminal presentation."""
+
+    escaped: list[str] = []
+    for character in str(value):
+        codepoint = ord(character)
+        if (
+            codepoint <= 0x1F
+            or 0x7F <= codepoint <= 0x9F
+            or character in _BIDI_CONTROLS
+            or character in _UNICODE_LINE_CONTROLS
+        ):
+            escaped.append(f"\\u{codepoint:04X}")
+        else:
+            escaped.append(character)
+    return "".join(escaped)
+
 
 def _clip(value: str, width: int) -> str:
-    return value if len(value) <= width else f"{value[: width - 1]}…"
+    escaped = escape_terminal_text(value)
+    return escaped if len(escaped) <= width else f"{escaped[: width - 1]}…"
 
 
 def render_report(report: AuditReport) -> str:
@@ -14,10 +51,11 @@ def render_report(report: AuditReport) -> str:
 
     parameter_count = sum(len(tool.parameters) for tool in report.tools)
     capability_count = sum(len(items) for items in report.capabilities.values())
+    display = escape_terminal_text
     lines = [
         "MCP ScopeCheck",
         "==============",
-        f"Target: {report.target}",
+        f"Target: {display(report.target)}",
         "Mode: static source analysis (target code was not imported or executed)",
         "",
         "5-S summary",
@@ -32,7 +70,9 @@ def render_report(report: AuditReport) -> str:
     if report.tools:
         lines.append("Tools")
         for tool in report.tools:
-            parameters = ", ".join(parameter.name for parameter in tool.parameters) or "none"
+            parameters = (
+                ", ".join(display(parameter.name) for parameter in tool.parameters) or "none"
+            )
             claims = []
             if tool.read_only_claimed:
                 claims.append("readOnlyHint=true")
@@ -40,13 +80,14 @@ def render_report(report: AuditReport) -> str:
             capabilities = sorted(
                 {item.capability.value for item in report.capabilities.get(tool.key, [])}
             )
+            capability_text = ", ".join(display(item) for item in capabilities) or "none"
             lines.extend(
                 [
-                    f"  {tool.name} ({tool.source_file}:{tool.line_number})",
+                    f"  {display(tool.name)} ({display(tool.source_file)}:{tool.line_number})",
                     f"    Description: {_clip(tool.description or '[empty]', 100)}",
                     f"    Parameters:  {parameters}",
                     f"    Claims:      {claim_text}",
-                    f"    Observed:    {', '.join(capabilities) or 'none'}",
+                    f"    Observed:    {capability_text}",
                 ]
             )
         lines.append("")
@@ -58,21 +99,23 @@ def render_report(report: AuditReport) -> str:
         for finding in report.findings:
             lines.extend(
                 [
-                    f"  [{finding.severity.name}] {finding.rule_id} {finding.title}",
-                    f"    Tool:     {finding.tool_name}",
-                    f"    Evidence: {finding.evidence.location} ({finding.evidence.symbol})",
-                    f"    Why:      {finding.message}",
-                    f"    Fix:      {finding.remediation}",
+                    f"  [{display(finding.severity.name)}] {display(finding.rule_id)} "
+                    f"{display(finding.title)}",
+                    f"    Tool:     {display(finding.tool_name)}",
+                    f"    Evidence: {display(finding.evidence.location)} "
+                    f"({display(finding.evidence.symbol)})",
+                    f"    Why:      {display(finding.message)}",
+                    f"    Fix:      {display(finding.remediation)}",
                 ]
             )
 
     if report.diagnostics:
         lines.extend(["", f"Diagnostics ({len(report.diagnostics)})"])
         for diagnostic in report.diagnostics:
-            location = diagnostic.source_file
+            location = display(diagnostic.source_file)
             if diagnostic.line_number:
                 location = f"{location}:{diagnostic.line_number}"
-            lines.append(f"  {location}: {diagnostic.message}")
+            lines.append(f"  {location}: {display(diagnostic.message)}")
 
     lines.extend(
         [
