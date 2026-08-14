@@ -89,6 +89,25 @@ Capabilities are facts about code structure; they are not automatically vulnerab
 
 Every finding carries a file, line, and symbol. Rules should prefer a narrow, explainable result over a high-volume keyword match.
 
+`MSC001` is deterministic indicator matching, not semantic prompt-injection
+analysis. Its labeled regression corpus covers direct instruction override,
+concealment, covert sensitive-data transfer, cross-call behavior, credential or
+context collection, privileged-role impersonation, and benign/suspicious
+language. Findings name the matched family and excerpt. A narrow educational
+context exception avoids treating documentation that discusses common prompt
+injection wording as an instruction. Zero corpus errors describe only the fixed
+local examples; they are not a general accuracy claim.
+
+`MSC102` is deterministic contract-mismatch detection. A disclosure must contain
+both an external target and an interaction action; isolated words such as `API`,
+`web`, `network`, or `remote` are insufficient. Explicit offline/no-network
+wording is a contradiction when egress is reachable. When a literal URL is
+available, ScopeCheck records its host and compares a small set of named services
+such as GitHub with that host. The matched or failed disclosure reason is retained
+in capability/finding evidence. This does not establish endpoint intent, validate
+the description's truthfulness, or understand paraphrases beyond the documented
+patterns.
+
 MCP tool annotations are untrusted declarations, not enforcement. ScopeCheck
 accepts the Python-style snake_case and protocol-style camelCase spellings for
 `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint`, then

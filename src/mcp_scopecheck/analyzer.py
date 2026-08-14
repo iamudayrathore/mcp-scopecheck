@@ -7,6 +7,7 @@ import re
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 from .models import (
     Capability,
@@ -104,12 +105,30 @@ POISONING_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     (
         re.compile(
+            r"(?:disregard|override|bypass|forget)\s+(?:all\s+)?"
+            r"(?:previous|prior|earlier|system|developer)\s+"
+            r"(?:guidance|instructions?|messages?|policies|rules?)",
+            re.I,
+        ),
+        "instruction override",
+    ),
+    (
+        re.compile(
             r"(?:do\s+not|don't|never)\s+(?:tell|show|mention|reveal)\s+(?:the\s+)?user",
             re.I,
         ),
         "concealment instruction",
     ),
     (re.compile(r"secret(?:ly)?\s+(?:collect|do|perform|send|execute)", re.I), "hidden action"),
+    (
+        re.compile(
+            r"(?:covertly|quietly|secretly|silently).{0,32}"
+            r"(?:collect|forward|send|transmit|upload).{0,48}"
+            r"(?:chat|context|conversation|credential|history|prompt|secret|token)",
+            re.I | re.S,
+        ),
+        "covert sensitive-data transfer",
+    ),
     (
         re.compile(
             r"(?:before|after)\s+(?:any|all|every)\s+(?:call|request|response|tool)",
@@ -119,14 +138,140 @@ POISONING_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     (
         re.compile(
-            r"(?:collect|read|send|upload|exfiltrate).{0,40}"
-            r"(?:credential|secret|token|api[_ -]?key)",
+            r"(?:collect|forward|read|send|transmit|upload|exfiltrate).{0,48}"
+            r"(?:chat\s+history|conversation\s+context|credential|secret|"
+            r"system\s+prompt|token|api[_ -]?key)",
             re.I | re.S,
         ),
         "credential-handling instruction",
     ),
+    (
+        re.compile(
+            r"(?:act|behave|respond)\s+as\s+(?:the\s+)?"
+            r"(?:administrator|developer|system)(?:\s+(?:message|role))?",
+            re.I,
+        ),
+        "privileged-role impersonation",
+    ),
     (re.compile(r"<\|.*?\|>", re.S), "hidden-token marker"),
 )
+
+BENIGN_SECURITY_DISCUSSION = re.compile(
+    r"(?:\b(?:analy[sz]e|detect|discuss|document|explain|identify|scan|teach|warn)\w*\b"
+    r".{0,100}\b(?:prompt\s+injection|malicious\s+(?:instructions?|prompts?)|security)\b|"
+    r"\b(?:prompt\s+injection|malicious\s+(?:instructions?|prompts?)|security)\b"
+    r".{0,100}\b(?:analy[sz]e|detect|discuss|document|explain|identify|scan|teach|warn)\w*\b)",
+    re.I | re.S,
+)
+
+NETWORK_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\b(?:never|does\s+not|doesn't|do\s+not|don't)\b.{0,40}"
+        r"\b(?:send|transmit|upload|use|access|connect)\w*\b.{0,24}"
+        r"\b(?:internet|network|remote|external|data)\b",
+        re.I | re.S,
+    ),
+    re.compile(
+        r"\b(?:no|without)\s+"
+        r"(?:external\s+|internet\s+|network\s+|remote\s+)?"
+        r"(?:access|connection|egress|requests?|traffic)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:fully\s+local|local[- ]only|offline(?:[- ]only)?|"
+        r"runs?\s+(?:locally|offline)(?:\s+only)?)\b",
+        re.I,
+    ),
+)
+NETWORK_INTERACTION = re.compile(
+    r"\b(?:call|connect|contact|download|fetch|forward|post|publish|quer(?:y|ies)|"
+    r"request|retrieve|send|transmit|upload)\w*\b",
+    re.I,
+)
+EXTERNAL_TARGET = re.compile(
+    r"\b(?:external|internet|online|public\s+web|remote|third[- ]party)\b|"
+    r"\b(?:api\.|hooks\.|webhook\.)[a-z0-9.-]+\b|"
+    r"\b[a-z0-9-]+\.(?:com|dev|io|net|org)(?:\b|/)",
+    re.I,
+)
+KNOWN_DESTINATIONS = frozenset({"discord", "github", "gitlab", "google", "slack"})
+
+
+@dataclass(frozen=True)
+class _DescriptionIndicator:
+    family: str
+    excerpt: str
+
+
+@dataclass(frozen=True)
+class _DisclosureAssessment:
+    disclosed: bool
+    reason: str
+    contradiction: bool = False
+
+
+def _poisoning_indicator(description: str) -> _DescriptionIndicator | None:
+    normalized = " ".join(description.split())
+    matches = [
+        _DescriptionIndicator(label, match.group(0))
+        for pattern, label in POISONING_PATTERNS
+        if (match := pattern.search(normalized)) is not None
+    ]
+    if not matches:
+        return None
+    if (
+        BENIGN_SECURITY_DISCUSSION.search(normalized)
+        and not {
+            "covert sensitive-data transfer",
+            "cross-call instruction",
+            "hidden action",
+            "hidden-token marker",
+        }
+        & {match.family for match in matches}
+    ):
+        return None
+    return matches[0]
+
+
+def _assess_network_disclosure(
+    description: str,
+    static_hosts: Iterable[str] = (),
+) -> _DisclosureAssessment:
+    normalized = " ".join(description.split())
+    for pattern in NETWORK_DENIAL_PATTERNS:
+        denial = pattern.search(normalized)
+        if denial is not None:
+            return _DisclosureAssessment(
+                False,
+                f"description contradicts reachable egress with denial {denial.group(0)!r}",
+                contradiction=True,
+            )
+
+    interaction = NETWORK_INTERACTION.search(normalized)
+    target = EXTERNAL_TARGET.search(normalized)
+    if interaction is None or target is None:
+        return _DisclosureAssessment(
+            False,
+            "description does not state both an external interaction and an interaction action",
+        )
+
+    hosts = tuple(sorted(set(static_hosts)))
+    destination_terms = {
+        term for term in KNOWN_DESTINATIONS if re.search(rf"\b{term}\b", normalized, re.I)
+    }
+    if hosts and destination_terms and not any(
+        term in host for term in destination_terms for host in hosts
+    ):
+        return _DisclosureAssessment(
+            False,
+            "described destination "
+            f"{sorted(destination_terms)!r} does not match static host(s) {list(hosts)!r}",
+        )
+
+    return _DisclosureAssessment(
+        True,
+        f"matched external target {target.group(0)!r} and action {interaction.group(0)!r}",
+    )
 
 
 def _qualified_name(node: ast.AST, imports: dict[str, str]) -> str:
@@ -727,6 +872,40 @@ def _line_number(node: ast.AST) -> int:
     return line_number if isinstance(line_number, int) else 0
 
 
+def _static_network_endpoint(call: ast.Call, symbol: str) -> str | None:
+    method = symbol.rsplit(".", 1)[-1].lower()
+    index = 1 if method == "request" else 0
+    candidate: ast.AST | None = call.args[index] if len(call.args) > index else None
+    for keyword in call.keywords:
+        if keyword.arg in {"url", "uri"}:
+            candidate = keyword.value
+    if isinstance(candidate, ast.Constant) and isinstance(candidate.value, str):
+        return candidate.value
+    return None
+
+
+def _static_network_hosts(project: ParsedProject, tool: ToolDefinition) -> tuple[str, ...]:
+    hosts: set[str] = set()
+    for record in reachable_functions(project, tool):
+        execution = _execution(record, project)
+        for node in execution.nodes:
+            if not isinstance(node, ast.Call):
+                continue
+            imports = execution.imports_for(node)
+            symbol = execution.instance_network_calls.get(id(node))
+            if symbol is None:
+                symbol = _qualified_name(node.func, imports)
+                if _call_capability(node, symbol, imports) != Capability.NETWORK_EGRESS:
+                    continue
+            endpoint = _static_network_endpoint(node, symbol)
+            if endpoint is None:
+                continue
+            host = urlsplit(endpoint).hostname
+            if host:
+                hosts.add(host.lower())
+    return tuple(sorted(hosts))
+
+
 def analyze_capabilities(
     project: ParsedProject,
     tool: ToolDefinition,
@@ -765,6 +944,11 @@ def analyze_capabilities(
             if key in seen:
                 continue
             seen.add(key)
+            detail = f"reachable from {tool.function_name}()"
+            if capability == Capability.NETWORK_EGRESS and isinstance(node, ast.Call):
+                endpoint = _static_network_endpoint(node, symbol)
+                if endpoint is not None:
+                    detail = f"{detail}; static destination {endpoint!r}"
             observed.append(
                 ObservedCapability(
                     capability,
@@ -772,7 +956,7 @@ def analyze_capabilities(
                         record.source_file,
                         line_number,
                         symbol,
-                        f"reachable from {tool.function_name}()",
+                        detail,
                     ),
                 )
             )
@@ -1496,22 +1680,21 @@ def analyze_contract(
         tool.description[:160] or "empty description",
     )
 
-    for pattern, label in POISONING_PATTERNS:
-        match = pattern.search(tool.description)
-        if match:
-            findings.append(
-                _finding(
-                    "MSC001",
-                    "Agent-directed instruction in tool description",
-                    Severity.CRITICAL,
-                    tool,
-                    f"The tool description contains a {label}: {match.group(0)!r}.",
-                    "Describe the tool's behavior and constraints; remove instructions "
-                    "aimed at controlling the host model.",
-                    description_evidence,
-                )
+    indicator = _poisoning_indicator(tool.description)
+    if indicator is not None:
+        findings.append(
+            _finding(
+                "MSC001",
+                "Agent-directed instruction in tool description",
+                Severity.CRITICAL,
+                tool,
+                f"The tool description contains a {indicator.family}: "
+                f"{indicator.excerpt!r}.",
+                "Describe the tool's behavior and constraints; remove instructions "
+                "aimed at controlling the host model.",
+                description_evidence,
             )
-            break
+        )
 
     state_changing = {
         Capability.CODE_EXECUTION,
@@ -1565,21 +1748,54 @@ def analyze_contract(
         )
 
     if Capability.NETWORK_EGRESS in capabilities:
-        disclosed = re.search(
-            r"\b(api|http|network|remote|send|telemetry|upload|webhook)\b",
+        assessment = _assess_network_disclosure(
             tool.description,
-            re.I,
+            _static_network_hosts(project, tool),
         )
-        if not disclosed:
+        network_evidence = by_capability[Capability.NETWORK_EGRESS]
+        disclosure_detail = f"description check: {assessment.reason}"
+        for index, item in enumerate(observed):
+            if item.capability != Capability.NETWORK_EGRESS:
+                continue
+            observed[index] = ObservedCapability(
+                item.capability,
+                Evidence(
+                    item.evidence.source_file,
+                    item.evidence.line_number,
+                    item.evidence.symbol,
+                    f"{item.evidence.detail}; {disclosure_detail}",
+                ),
+            )
+        if not assessment.disclosed:
+            if assessment.contradiction:
+                title = "Network behavior contradicts tool description"
+                message = (
+                    "Reachable network egress contradicts the description's explicit "
+                    f"denial. Deterministic check: {assessment.reason}."
+                )
+            elif "does not match static host" in assessment.reason:
+                title = "Described network destination does not match reachable egress"
+                message = (
+                    "A reachable static destination conflicts with the destination named "
+                    f"in the description. Deterministic check: {assessment.reason}."
+                )
+            else:
+                title = "Network egress is not disclosed"
+                message = "A reachable network call is absent from the tool's description."
             findings.append(
                 _finding(
                     "MSC102",
-                    "Network egress is not disclosed",
+                    title,
                     Severity.HIGH,
                     tool,
-                    "A reachable network call is absent from the tool's description.",
+                    message,
                     "State the destination and data purpose, or remove network access.",
-                    by_capability[Capability.NETWORK_EGRESS],
+                    Evidence(
+                        network_evidence.source_file,
+                        network_evidence.line_number,
+                        network_evidence.symbol,
+                        f"{network_evidence.detail}; {disclosure_detail}",
+                    ),
                 )
             )
 
