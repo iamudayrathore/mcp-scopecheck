@@ -40,10 +40,12 @@ other machine-readable report format.
 
 ## Safety limits
 
-- Symlinked source files are skipped.
 - Known dependency/cache/build directories are skipped.
 - Individual source files are limited to 1 MB.
 - A directory audit is limited to 5,000 Python files.
+- All accepted Python source is limited to 20 MB per audit.
+- Parsed trees are limited to 500,000 total AST nodes and 200 AST levels.
+- At most 100 target diagnostics are retained.
 - Static decorator metadata accepts only bounded JSON-like values. Each tool's
   metadata is limited to 256 decoded nodes, 12 nesting levels, 16,384 UTF-8
   string bytes, 256-bit integers, and 128 collection items.
@@ -51,10 +53,17 @@ other machine-readable report format.
   unsupported metadata syntax are rejected. `ToolAnnotations(...)` is handled
   as an explicitly supported static keyword container; it is never invoked.
 - Syntax/read failures are reported as diagnostics instead of silently ignored.
-- A symlink supplied as the audit target is rejected, and symlinked Python files found inside a directory target are skipped.
+- A symlink supplied directly as a file or directory target is rejected.
+  Symlinked files and directories encountered inside a directory target are
+  skipped, and traversal explicitly disables link following.
 
 Invalid or over-budget tool metadata keeps the discovered tool visible but adds
 a deterministic diagnostic, makes the audit incomplete, and yields exit `2`.
+File-count, cumulative-byte, AST-node, AST-depth, and diagnostic-count overruns
+likewise stop analysis with a stable `analysis incomplete` diagnostic and exit
+`2`; partial results are never presented as a complete clean audit. The
+outside-root directory-symlink regression passes on CPython 3.11.14, 3.12.12,
+and 3.13.7 and is part of the supported-version test suite.
 Unexpected internal ScopeCheck exceptions are not converted into target errors.
 
 ## Reachability model

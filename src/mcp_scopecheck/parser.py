@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import inspect
 import math
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +28,10 @@ SKIP_DIRECTORIES = {
 }
 MAX_SOURCE_BYTES = 1_000_000
 MAX_SOURCE_FILES = 5_000
+MAX_TOTAL_SOURCE_BYTES = 20_000_000
+MAX_TOTAL_AST_NODES = 500_000
+MAX_AST_DEPTH = 200
+MAX_DIAGNOSTICS = 100
 MAX_METADATA_NODES = 256
 MAX_METADATA_DEPTH = 12
 MAX_METADATA_STRING_BYTES = 16_384
@@ -62,6 +67,10 @@ class ParseTargetError(ValueError):
 
 class MetadataDecodeError(ValueError):
     """Raised when static tool metadata is unsupported or exceeds its budget."""
+
+
+class AnalysisBudgetExceeded(ValueError):
+    """Raised internally when a total static-analysis budget is exhausted."""
 
 
 @dataclass
@@ -488,18 +497,80 @@ def _candidate_files(target: Path) -> Iterable[Path]:
         yield target
         return
 
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
     candidates: list[Path] = []
-    for path in target.rglob("*.py"):
-        relative = path.relative_to(target)
-        if any(part in SKIP_DIRECTORIES for part in relative.parts):
-            continue
-        if path.is_symlink() or not path.is_file():
-            continue
-        candidates.append(path)
-        if len(candidates) > MAX_SOURCE_FILES:
-            raise ParseTargetError(f"target exceeds the {MAX_SOURCE_FILES}-file safety limit")
+    for current, directories, files in os.walk(
+        target,
+        topdown=True,
+        onerror=raise_walk_error,
+        followlinks=False,
+    ):
+        current_path = Path(current)
+        directories[:] = sorted(
+            directory
+            for directory in directories
+            if directory not in SKIP_DIRECTORIES
+            and not (current_path / directory).is_symlink()
+        )
+        for filename in sorted(files):
+            if not filename.endswith(".py"):
+                continue
+            path = current_path / filename
+            if path.is_symlink() or not path.is_file():
+                continue
+            candidates.append(path)
+            if len(candidates) > MAX_SOURCE_FILES:
+                raise AnalysisBudgetExceeded(
+                    "analysis incomplete: Python source file count exceeds "
+                    f"limit of {MAX_SOURCE_FILES}"
+                )
 
     yield from sorted(candidates)
+
+
+def _add_diagnostic(project: ParsedProject, diagnostic: Diagnostic) -> bool:
+    """Append a diagnostic without allowing hostile targets to grow it unbounded."""
+
+    if len(project.diagnostics) < MAX_DIAGNOSTICS:
+        project.diagnostics.append(diagnostic)
+        return True
+    limit = Diagnostic(
+        "<target>",
+        f"analysis incomplete: diagnostic limit of {MAX_DIAGNOSTICS} reached",
+    )
+    if project.diagnostics:
+        project.diagnostics[-1] = limit
+    else:
+        project.diagnostics.append(limit)
+    return False
+
+
+def _ast_metrics(tree: ast.AST, remaining_nodes: int) -> tuple[int, int]:
+    count = 0
+    maximum_depth = 0
+    stack: list[tuple[ast.AST, int]] = [(tree, 1)]
+    while stack:
+        node, depth = stack.pop()
+        count += 1
+        maximum_depth = max(maximum_depth, depth)
+        if count > remaining_nodes:
+            raise AnalysisBudgetExceeded(
+                "analysis incomplete: total AST node count exceeds "
+                f"limit of {MAX_TOTAL_AST_NODES}"
+            )
+        if depth > MAX_AST_DEPTH:
+            raise AnalysisBudgetExceeded(
+                f"analysis incomplete: AST depth exceeds limit of {MAX_AST_DEPTH}"
+            )
+        stack.extend((child, depth + 1) for child in ast.iter_child_nodes(node))
+    return count, maximum_depth
+
+
+def _finish_project(project: ParsedProject) -> ParsedProject:
+    project.tools.sort(key=lambda item: (item.source_file, item.line_number, item.name))
+    return project
 
 
 def parse_project(target: str | Path) -> ParsedProject:
@@ -516,33 +587,89 @@ def parse_project(target: str | Path) -> ParsedProject:
     project_root = root.parent if root.is_file() else root
     project = ParsedProject(root=project_root)
 
-    for path in _candidate_files(root):
+    try:
+        candidates = list(_candidate_files(root))
+    except AnalysisBudgetExceeded as exc:
+        _add_diagnostic(project, Diagnostic("<target>", str(exc)))
+        return _finish_project(project)
+    except OSError as exc:
+        _add_diagnostic(
+            project,
+            Diagnostic("<target>", f"unable to enumerate target: {exc}"),
+        )
+        return _finish_project(project)
+
+    total_source_bytes = 0
+    total_ast_nodes = 0
+    for path in candidates:
         relative = path.relative_to(project_root).as_posix()
         try:
             size = path.stat().st_size
         except OSError as exc:
-            project.diagnostics.append(Diagnostic(relative, f"unable to stat file: {exc}"))
+            if not _add_diagnostic(
+                project,
+                Diagnostic(relative, f"unable to stat file: {exc}"),
+            ):
+                return _finish_project(project)
             continue
         if size > MAX_SOURCE_BYTES:
-            project.diagnostics.append(
-                Diagnostic(relative, f"skipped: file exceeds {MAX_SOURCE_BYTES} bytes")
-            )
+            if not _add_diagnostic(
+                project,
+                Diagnostic(relative, f"skipped: file exceeds {MAX_SOURCE_BYTES} bytes"),
+            ):
+                return _finish_project(project)
             continue
+        if total_source_bytes + size > MAX_TOTAL_SOURCE_BYTES:
+            _add_diagnostic(
+                project,
+                Diagnostic(
+                    relative,
+                    "analysis incomplete: total Python source bytes exceed "
+                    f"limit of {MAX_TOTAL_SOURCE_BYTES}",
+                ),
+            )
+            return _finish_project(project)
+        total_source_bytes += size
 
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
-            project.diagnostics.append(Diagnostic(relative, f"unable to read file: {exc}"))
+            if not _add_diagnostic(
+                project,
+                Diagnostic(relative, f"unable to read file: {exc}"),
+            ):
+                return _finish_project(project)
             continue
 
         project.files_scanned += 1
         try:
             tree = ast.parse(content, filename=relative)
         except SyntaxError as exc:
-            project.diagnostics.append(
-                Diagnostic(relative, exc.msg, line_number=exc.lineno or 0)
-            )
+            if not _add_diagnostic(
+                project,
+                Diagnostic(relative, exc.msg, line_number=exc.lineno or 0),
+            ):
+                return _finish_project(project)
             continue
+        except RecursionError:
+            _add_diagnostic(
+                project,
+                Diagnostic(
+                    relative,
+                    "analysis incomplete: Python parser recursion limit exceeded",
+                ),
+            )
+            return _finish_project(project)
+
+        try:
+            node_count, _ = _ast_metrics(
+                tree,
+                MAX_TOTAL_AST_NODES - total_ast_nodes,
+            )
+        except AnalysisBudgetExceeded as exc:
+            _add_diagnostic(project, Diagnostic(relative, str(exc)))
+            return _finish_project(project)
+        total_ast_nodes += node_count
 
         aliases = _imports(tree)
         path_bindings = _module_path_bindings(tree, aliases)
@@ -563,13 +690,15 @@ def parse_project(target: str | Path) -> ParsedProject:
                     node,
                 )
                 for message in metadata_errors:
-                    project.diagnostics.append(
+                    if not _add_diagnostic(
+                        project,
                         Diagnostic(
                             relative,
                             f"invalid tool metadata: {message}",
                             line_number=_node_line_number(decorator),
-                        )
-                    )
+                        ),
+                    ):
+                        return _finish_project(project)
                 project.tools.append(
                     ToolDefinition(
                         name=name,
@@ -584,5 +713,4 @@ def parse_project(target: str | Path) -> ParsedProject:
                 )
                 break
 
-    project.tools.sort(key=lambda item: (item.source_file, item.line_number, item.name))
-    return project
+    return _finish_project(project)

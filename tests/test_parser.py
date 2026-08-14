@@ -239,8 +239,15 @@ class ParserTests(unittest.TestCase):
             (root / "one.py").write_text("value = 1\n", encoding="utf-8")
             (root / "two.py").write_text("value = 2\n", encoding="utf-8")
             with patch("mcp_scopecheck.parser.MAX_SOURCE_FILES", 1):
-                with self.assertRaisesRegex(ParseTargetError, "1-file safety limit"):
-                    parse_project(root)
+                project = parse_project(root)
+
+        self.assertEqual(project.files_scanned, 0)
+        self.assertEqual(len(project.diagnostics), 1)
+        self.assertEqual(project.diagnostics[0].source_file, "<target>")
+        self.assertEqual(
+            project.diagnostics[0].message,
+            "analysis incomplete: Python source file count exceeds limit of 1",
+        )
 
     def test_symlinked_files_are_skipped_and_direct_symlink_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
