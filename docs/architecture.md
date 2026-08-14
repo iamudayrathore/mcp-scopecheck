@@ -87,6 +87,16 @@ methods remain network capabilities but are not guessed to be writes.
 `MSC108` separately compares any reachable external network interaction with
 `openWorldHint=false`.
 
+Filesystem classification uses resolved builtins and import aliases plus a
+narrow, flow-sensitive model for values constructed from `pathlib.Path`.
+Unresolved receiver methods such as arbitrary `.open()` or `.replace()` calls
+are not guessed to be filesystem operations. Static `open` modes containing
+`w`, `a`, `x`, or `+` and static `os.open` write flags are classified as writes;
+other static modes and `O_RDONLY` are reads. A dynamic mode or flag still proves
+that a supported filesystem API is reached, but not whether it writes, so v0.1
+records the read capability as a lower bound. This may under-report a dynamic
+write and deliberately does not create a read-only/write contradiction.
+
 `MSC103` requires a recognized containment comparison such as `relative_to`, `is_relative_to`, or `commonpath`; path normalization with `resolve()` alone is not treated as containment. The rule still does not prove that a guard dominates a filesystem sink or compares against the correct trusted root.
 
 `MSC105` follows direct environment reads and simple name-to-name or payload

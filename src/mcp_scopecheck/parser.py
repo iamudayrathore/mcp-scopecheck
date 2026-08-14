@@ -104,6 +104,7 @@ class FunctionRecord:
     source_file: str
     node: ast.FunctionDef | ast.AsyncFunctionDef
     imports: dict[str, str]
+    path_bindings: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -409,6 +410,67 @@ def _imports(tree: ast.Module) -> dict[str, str]:
     return aliases
 
 
+def _import_qualified_name(node: ast.AST, imports: dict[str, str]) -> str:
+    if isinstance(node, ast.Name):
+        return imports.get(node.id, node.id)
+    if isinstance(node, ast.Attribute):
+        prefix = _import_qualified_name(node.value, imports)
+        return f"{prefix}.{node.attr}" if prefix else node.attr
+    return ""
+
+
+def _is_path_expression(
+    node: ast.AST,
+    imports: dict[str, str],
+    path_bindings: set[str],
+) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id in path_bindings
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        return _is_path_expression(node.left, imports, path_bindings)
+    if isinstance(node, ast.Attribute) and node.attr == "parent":
+        return _is_path_expression(node.value, imports, path_bindings)
+    if not isinstance(node, ast.Call):
+        return False
+    if _import_qualified_name(node.func, imports) == "pathlib.Path":
+        return True
+    if isinstance(node.func, ast.Attribute) and node.func.attr in {
+        "absolute",
+        "expanduser",
+        "joinpath",
+        "resolve",
+        "with_name",
+        "with_suffix",
+    }:
+        return _is_path_expression(node.func.value, imports, path_bindings)
+    return False
+
+
+def _module_path_bindings(tree: ast.Module, imports: dict[str, str]) -> frozenset[str]:
+    bindings: set[str] = set()
+    for node in tree.body:
+        targets: list[ast.AST] = []
+        value: ast.AST | None = None
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+            value = node.value
+        if not targets:
+            continue
+        assigned = {
+            target.id
+            for target in targets
+            if isinstance(target, ast.Name)
+        }
+        is_path = value is not None and _is_path_expression(value, imports, bindings)
+        bindings.difference_update(assigned)
+        if is_path:
+            bindings.update(assigned)
+    return frozenset(bindings)
+
+
 def _candidate_files(target: Path) -> Iterable[Path]:
     if target.is_file():
         if target.suffix != ".py":
@@ -473,10 +535,16 @@ def parse_project(target: str | Path) -> ParsedProject:
             continue
 
         aliases = _imports(tree)
+        path_bindings = _module_path_bindings(tree, aliases)
         for node in tree.body:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            project.functions[(relative, node.name)] = FunctionRecord(relative, node, aliases)
+            project.functions[(relative, node.name)] = FunctionRecord(
+                relative,
+                node,
+                aliases,
+                path_bindings,
+            )
             for decorator in node.decorator_list:
                 if not _is_tool_decorator(decorator):
                     continue

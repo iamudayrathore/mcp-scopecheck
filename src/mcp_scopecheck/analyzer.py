@@ -17,24 +17,26 @@ from .models import (
 )
 from .parser import FunctionRecord, ParsedProject
 
-FILE_READ_SUFFIXES = (
-    ".glob",
-    ".iterdir",
-    ".read_bytes",
-    ".read_text",
-    ".rglob",
-)
-FILE_WRITE_SUFFIXES = (
-    ".chmod",
-    ".mkdir",
-    ".rename",
-    ".replace",
-    ".rmdir",
-    ".touch",
-    ".unlink",
-    ".write_bytes",
-    ".write_text",
-)
+PATH_READ_METHODS = {"glob", "iterdir", "read_bytes", "read_text", "rglob"}
+PATH_WRITE_METHODS = {
+    "chmod",
+    "mkdir",
+    "rename",
+    "replace",
+    "rmdir",
+    "touch",
+    "unlink",
+    "write_bytes",
+    "write_text",
+}
+PATH_RETURNING_METHODS = {
+    "absolute",
+    "expanduser",
+    "joinpath",
+    "resolve",
+    "with_name",
+    "with_suffix",
+}
 FILE_WRITE_CALLS = {
     "os.makedirs",
     "os.mkdir",
@@ -48,6 +50,13 @@ FILE_WRITE_CALLS = {
     "shutil.copyfile",
     "shutil.move",
     "shutil.rmtree",
+}
+OS_OPEN_WRITE_FLAGS = {
+    "os.O_APPEND",
+    "os.O_CREAT",
+    "os.O_RDWR",
+    "os.O_TRUNC",
+    "os.O_WRONLY",
 }
 NETWORK_PREFIXES = (
     "aiohttp.",
@@ -164,12 +173,10 @@ def reachable_functions(project: ParsedProject, tool: ToolDefinition) -> list[Fu
     return records
 
 
-def _open_capability(call: ast.Call, name: str) -> Capability | None:
-    if name not in {"open", "builtins.open", "io.open"} and not name.endswith(".open"):
-        return None
+def _mode_capability(call: ast.Call, positional_index: int) -> Capability:
     mode_node: ast.AST | None = None
-    if len(call.args) >= 2:
-        mode_node = call.args[1]
+    if len(call.args) > positional_index:
+        mode_node = call.args[positional_index]
     for keyword in call.keywords:
         if keyword.arg == "mode":
             mode_node = keyword.value
@@ -183,13 +190,45 @@ def _open_capability(call: ast.Call, name: str) -> Capability | None:
     )
 
 
-def _call_capability(call: ast.Call, name: str) -> Capability | None:
-    opened = _open_capability(call, name)
-    if opened is not None:
-        return opened
-    if name.endswith(FILE_READ_SUFFIXES):
-        return Capability.FILESYSTEM_READ
-    if name in FILE_WRITE_CALLS or name.endswith(FILE_WRITE_SUFFIXES):
+def _os_open_writes(node: ast.AST, imports: dict[str, str]) -> bool | None:
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        left = _os_open_writes(node.left, imports)
+        right = _os_open_writes(node.right, imports)
+        if left is True or right is True:
+            return True
+        if left is False and right is False:
+            return False
+        return None
+    name = _qualified_name(node, imports)
+    if name in OS_OPEN_WRITE_FLAGS:
+        return True
+    if name == "os.O_RDONLY":
+        return False
+    if isinstance(node, ast.Constant) and node.value == 0:
+        return False
+    return None
+
+
+def _os_open_capability(call: ast.Call, imports: dict[str, str]) -> Capability:
+    flags: ast.AST | None = call.args[1] if len(call.args) >= 2 else None
+    for keyword in call.keywords:
+        if keyword.arg == "flags":
+            flags = keyword.value
+    writes = _os_open_writes(flags, imports) if flags is not None else None
+    return Capability.FILESYSTEM_WRITE if writes is True else Capability.FILESYSTEM_READ
+
+
+def _call_capability(
+    call: ast.Call,
+    name: str,
+    imports: dict[str, str] | None = None,
+) -> Capability | None:
+    resolved_imports = imports or {}
+    if name in {"open", "builtins.open", "io.open"}:
+        return _mode_capability(call, 1)
+    if name == "os.open":
+        return _os_open_capability(call, resolved_imports)
+    if name in FILE_WRITE_CALLS:
         return Capability.FILESYSTEM_WRITE
     if name == "os.getenv" or name.endswith(".environ.get"):
         return Capability.ENVIRONMENT_READ
@@ -361,6 +400,135 @@ def _instance_network_calls(record: FunctionRecord) -> list[tuple[ast.Call, str]
     return _ClientBindingVisitor(record.imports).scan(record.node.body)
 
 
+class _PathBindingVisitor(ast.NodeVisitor):
+    """Classify pathlib operations only on statically proven Path values."""
+
+    def __init__(self, record: FunctionRecord) -> None:
+        self.imports = record.imports
+        self.bindings = set(record.path_bindings)
+        self.filesystem_calls: list[tuple[ast.Call, str, Capability]] = []
+
+    def scan(self, statements: list[ast.stmt]) -> list[tuple[ast.Call, str, Capability]]:
+        for statement in statements:
+            self.visit(statement)
+        return self.filesystem_calls
+
+    def _is_path_value(self, value: ast.AST) -> bool:
+        if isinstance(value, ast.Name):
+            return value.id in self.bindings
+        if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Div):
+            return self._is_path_value(value.left)
+        if isinstance(value, ast.Attribute) and value.attr == "parent":
+            return self._is_path_value(value.value)
+        if not isinstance(value, ast.Call):
+            return False
+        if _qualified_name(value.func, self.imports) == "pathlib.Path":
+            return True
+        return (
+            isinstance(value.func, ast.Attribute)
+            and value.func.attr in PATH_RETURNING_METHODS
+            and self._is_path_value(value.func.value)
+        )
+
+    def _update_targets(self, targets: Iterable[ast.AST], is_path: bool) -> None:
+        for target in targets:
+            for name in _assigned_names(target):
+                self.bindings.discard(name)
+                if is_path:
+                    self.bindings.add(name)
+
+    def _path_call(self, call: ast.Call) -> tuple[str, Capability] | None:
+        if not isinstance(call.func, ast.Attribute):
+            return None
+        if not self._is_path_value(call.func.value):
+            return None
+        method = call.func.attr
+        symbol = _qualified_name(call.func, self.imports)
+        if method in PATH_READ_METHODS:
+            return symbol, Capability.FILESYSTEM_READ
+        if method in PATH_WRITE_METHODS:
+            return symbol, Capability.FILESYSTEM_WRITE
+        if method == "open":
+            return symbol, _mode_capability(call, 0)
+        return None
+
+    def _is_path_iterator(self, value: ast.AST) -> bool:
+        return (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr in {"glob", "iterdir", "rglob"}
+            and self._is_path_value(value.func.value)
+        )
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self.visit(node.value)
+        self._update_targets(node.targets, self._is_path_value(node.value))
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if node.value is not None:
+            self.visit(node.value)
+        is_path = node.value is not None and self._is_path_value(node.value)
+        self._update_targets([node.target], is_path)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self.visit(node.value)
+        self._update_targets([node.target], self._is_path_value(node.value))
+
+    def visit_Delete(self, node: ast.Delete) -> None:
+        self._update_targets(node.targets, False)
+
+    def _visit_for(
+        self,
+        iterator: ast.AST,
+        target: ast.AST,
+        body: list[ast.stmt],
+        orelse: list[ast.stmt],
+    ) -> None:
+        self.visit(iterator)
+        self._update_targets([target], self._is_path_iterator(iterator))
+        for statement in [*body, *orelse]:
+            self.visit(statement)
+
+    def visit_For(self, node: ast.For) -> None:
+        self._visit_for(node.iter, node.target, node.body, node.orelse)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self._visit_for(node.iter, node.target, node.body, node.orelse)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.bindings.discard(node.name)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.bindings.discard(node.name)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.bindings.discard(node.name)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for item in node.names:
+            self.bindings.discard(item.asname or item.name.split(".")[0])
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for item in node.names:
+            self.bindings.discard(item.asname or item.name)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        path_call = self._path_call(node)
+        if path_call is not None:
+            symbol, capability = path_call
+            self.filesystem_calls.append((node, symbol, capability))
+        self.generic_visit(node)
+
+
+def _path_filesystem_calls(
+    record: FunctionRecord,
+) -> list[tuple[ast.Call, str, Capability]]:
+    return _PathBindingVisitor(record).scan(record.node.body)
+
+
 def _environment_subscript(node: ast.Subscript, imports: dict[str, str]) -> bool:
     return _qualified_name(node.value, imports) in {"os.environ", "environ"}
 
@@ -383,17 +551,24 @@ def analyze_capabilities(
             id(call): symbol
             for call, symbol in _instance_network_calls(record)
         }
+        path_filesystem_calls = {
+            id(call): (symbol, capability)
+            for call, symbol, capability in _path_filesystem_calls(record)
+        }
         for node in ast.walk(record.node):
             capability: Capability | None = None
             symbol = ""
             if isinstance(node, ast.Call):
                 instance_symbol = instance_network_calls.get(id(node))
-                if instance_symbol is not None:
+                path_call = path_filesystem_calls.get(id(node))
+                if path_call is not None:
+                    symbol, capability = path_call
+                elif instance_symbol is not None:
                     symbol = instance_symbol
                     capability = Capability.NETWORK_EGRESS
                 else:
                     symbol = _qualified_name(node.func, record.imports)
-                    capability = _call_capability(node, symbol)
+                    capability = _call_capability(node, symbol, record.imports)
             elif isinstance(node, ast.Subscript) and _environment_subscript(node, record.imports):
                 symbol = _qualified_name(node.value, record.imports)
                 capability = Capability.ENVIRONMENT_READ
@@ -440,7 +615,7 @@ def _reads_environment(node: ast.AST, imports: dict[str, str]) -> bool:
     return any(
         (
             isinstance(child, ast.Call)
-            and _call_capability(child, _qualified_name(child.func, imports))
+            and _call_capability(child, _qualified_name(child.func, imports), imports)
             == Capability.ENVIRONMENT_READ
         )
         or (isinstance(child, ast.Subscript) and _environment_subscript(child, imports))
@@ -489,7 +664,7 @@ def _tainted_environment_to_network(record: FunctionRecord) -> Evidence | None:
             name = _qualified_name(node.func, record.imports)
         if (
             id(node) not in instance_network_calls
-            and _call_capability(node, name) != Capability.NETWORK_EGRESS
+            and _call_capability(node, name, record.imports) != Capability.NETWORK_EGRESS
         ):
             continue
         if _names(node) & tainted or _reads_environment(node, record.imports):
