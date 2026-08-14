@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
 from mcp_scopecheck.auditor import audit
+from mcp_scopecheck.cli import main
 from mcp_scopecheck.models import Capability
 from mcp_scopecheck.parser import ParseTargetError, parse_project
+from mcp_scopecheck.render import render_report
 
 
 class ParserTests(unittest.TestCase):
@@ -38,6 +42,7 @@ class ParserTests(unittest.TestCase):
             project = parse_project(root)
 
         self.assertEqual(len(project.tools), 1)
+        self.assertEqual(project.diagnostics, [])
         tool = project.tools[0]
         self.assertEqual(tool.name, "public_name")
         self.assertEqual(tool.function_name, "internal_name")
@@ -57,6 +62,135 @@ class ParserTests(unittest.TestCase):
                 ("exact", "bool", "False", False),
             ],
         )
+
+    def test_unsupported_annotation_value_is_a_controlled_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "server.py").write_text(
+                "\n".join(
+                    [
+                        '@mcp.tool(annotations={"custom": {"not", "json"}})',
+                        "def example():",
+                        "    return None",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            report = audit(root)
+            rendered = render_report(report)
+            stdout = StringIO()
+            stderr = StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main(["audit", str(root)])
+
+        self.assertEqual(len(report.tools), 1)
+        self.assertEqual(report.tools[0].annotations, {})
+        self.assertEqual(len(report.diagnostics), 1)
+        self.assertIn("unsupported metadata syntax: Set", report.diagnostics[0].message)
+        self.assertIn("Diagnostics (1)", rendered)
+        self.assertEqual(exit_code, 2)
+        self.assertNotIn("Traceback", stdout.getvalue() + stderr.getvalue())
+
+    def test_metadata_limits_fail_closed_with_stable_diagnostics(self) -> None:
+        cases = (
+            (
+                "depth",
+                '@mcp.tool(annotations={"custom": [[[[True]]]]})',
+                "MAX_METADATA_DEPTH",
+                2,
+                "maximum nesting depth of 2",
+            ),
+            (
+                "nodes",
+                '@mcp.tool(annotations={"custom": [True]})',
+                "MAX_METADATA_NODES",
+                2,
+                "exceeds 2 decoded nodes",
+            ),
+            (
+                "strings",
+                '@mcp.tool(annotations={"custom": "oversized"})',
+                "MAX_METADATA_STRING_BYTES",
+                8,
+                "strings exceed 8 UTF-8 bytes",
+            ),
+            (
+                "integer",
+                '@mcp.tool(annotations={"custom": 256})',
+                "MAX_METADATA_INTEGER_BITS",
+                4,
+                "integer exceeds 4 bits",
+            ),
+            (
+                "collection",
+                '@mcp.tool(annotations={"custom": [1, 2, 3]})',
+                "MAX_METADATA_COLLECTION_ITEMS",
+                1,
+                "collections exceed 1 items",
+            ),
+        )
+        for label, decorator, constant, limit, expected in cases:
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    (root / "server.py").write_text(
+                        f"{decorator}\ndef example():\n    return None\n",
+                        encoding="utf-8",
+                    )
+                    with patch(f"mcp_scopecheck.parser.{constant}", limit):
+                        report = audit(root)
+
+                self.assertEqual(len(report.tools), 1)
+                self.assertEqual(len(report.diagnostics), 1)
+                self.assertIn(expected, report.diagnostics[0].message)
+
+    def test_json_like_unknown_annotations_remain_serializable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "server.py").write_text(
+                "\n".join(
+                    [
+                        "@mcp.tool(",
+                        "    annotations={",
+                        "        'readOnlyHint': True,",
+                        "        'custom': {'labels': ('safe', 1, None), 'ratio': 1.5},",
+                        "    },",
+                        ")",
+                        "def example():",
+                        "    return None",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            report = audit(root)
+
+        self.assertEqual(report.diagnostics, [])
+        self.assertEqual(
+            report.tools[0].annotations,
+            {
+                "readOnlyHint": True,
+                "custom": {"labels": ["safe", 1, None], "ratio": 1.5},
+            },
+        )
+        self.assertEqual(len(report.snapshot), 64)
+
+    def test_known_annotation_fields_require_booleans(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "server.py").write_text(
+                "@mcp.tool(annotations={'readOnlyHint': 'yes', 'custom': 1})\n"
+                "def example():\n"
+                "    return None\n",
+                encoding="utf-8",
+            )
+
+            report = audit(root)
+
+        self.assertEqual(report.tools[0].annotations, {"custom": 1})
+        self.assertEqual(len(report.diagnostics), 1)
+        self.assertIn("annotation 'readOnlyHint' must be a boolean", report.diagnostics[0].message)
 
     def test_import_aliases_are_used_for_capability_and_flow_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

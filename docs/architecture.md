@@ -44,8 +44,18 @@ other machine-readable report format.
 - Known dependency/cache/build directories are skipped.
 - Individual source files are limited to 1 MB.
 - A directory audit is limited to 5,000 Python files.
+- Static decorator metadata accepts only bounded JSON-like values. Each tool's
+  metadata is limited to 256 decoded nodes, 12 nesting levels, 16,384 UTF-8
+  string bytes, 256-bit integers, and 128 collection items.
+- Calls, comprehensions, sets, dictionary expansion, and other executable or
+  unsupported metadata syntax are rejected. `ToolAnnotations(...)` is handled
+  as an explicitly supported static keyword container; it is never invoked.
 - Syntax/read failures are reported as diagnostics instead of silently ignored.
 - A symlink supplied as the audit target is rejected, and symlinked Python files found inside a directory target are skipped.
+
+Invalid or over-budget tool metadata keeps the discovered tool visible but adds
+a deterministic diagnostic, makes the audit incomplete, and yields exit `2`.
+Unexpected internal ScopeCheck exceptions are not converted into target errors.
 
 ## Reachability model
 

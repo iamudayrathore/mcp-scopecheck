@@ -28,7 +28,7 @@ class RenderSecurityTests(unittest.TestCase):
         controls = "".join(chr(codepoint) for codepoint in range(0x20))
         controls += "".join(chr(codepoint) for codepoint in range(0x7F, 0xA0))
         controls += "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e"
-        controls += "\u2028\u2029\u2066\u2067\u2068\u2069"
+        controls += "\u2028\u2029\u2066\u2067\u2068\u2069\ud800"
 
         escaped = escape_terminal_text(f"café 工具 {controls}")
 
@@ -39,6 +39,7 @@ class RenderSecurityTests(unittest.TestCase):
         self.assertIn("\\u0085", escaped)
         self.assertIn("\\u202E", escaped)
         self.assertIn("\\u2069", escaped)
+        self.assertIn("\\uD800", escaped)
         self.assertFalse(any(character in escaped for character in controls))
 
     def test_report_fields_cannot_inject_or_reorder_output(self) -> None:

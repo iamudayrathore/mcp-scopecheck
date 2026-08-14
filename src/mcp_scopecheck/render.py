@@ -32,6 +32,7 @@ def escape_terminal_text(value: object) -> str:
         if (
             codepoint <= 0x1F
             or 0x7F <= codepoint <= 0x9F
+            or 0xD800 <= codepoint <= 0xDFFF
             or character in _BIDI_CONTROLS
             or character in _UNICODE_LINE_CONTROLS
         ):

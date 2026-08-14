@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from mcp_scopecheck.cli import main
 
@@ -71,6 +72,11 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("Diagnostics (1)", output)
         self.assertIn("audit incomplete because diagnostics were reported", error)
+
+    def test_internal_failures_are_not_mislabeled_as_target_errors(self) -> None:
+        with patch("mcp_scopecheck.cli.audit", side_effect=RuntimeError("internal failure")):
+            with self.assertRaisesRegex(RuntimeError, "internal failure"):
+                invoke(["audit", "."])
 
 
 if __name__ == "__main__":

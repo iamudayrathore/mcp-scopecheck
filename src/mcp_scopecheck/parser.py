@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import ast
 import inspect
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias
 
 from .models import Diagnostic, Parameter, ToolDefinition
 
@@ -26,10 +27,73 @@ SKIP_DIRECTORIES = {
 }
 MAX_SOURCE_BYTES = 1_000_000
 MAX_SOURCE_FILES = 5_000
+MAX_METADATA_NODES = 256
+MAX_METADATA_DEPTH = 12
+MAX_METADATA_STRING_BYTES = 16_384
+MAX_METADATA_INTEGER_BITS = 256
+MAX_METADATA_COLLECTION_ITEMS = 128
+
+MetadataValue: TypeAlias = (
+    None
+    | bool
+    | int
+    | float
+    | str
+    | list["MetadataValue"]
+    | dict[str, "MetadataValue"]
+)
+
+_BOOLEAN_ANNOTATIONS = {
+    "destructiveHint",
+    "destructive_hint",
+    "idempotentHint",
+    "idempotent_hint",
+    "openWorldHint",
+    "open_world_hint",
+    "readOnlyHint",
+    "read_only_hint",
+}
 
 
 class ParseTargetError(ValueError):
     """Raised when an audit target cannot be read safely."""
+
+
+class MetadataDecodeError(ValueError):
+    """Raised when static tool metadata is unsupported or exceeds its budget."""
+
+
+@dataclass
+class _MetadataBudget:
+    nodes: int = 0
+    string_bytes: int = 0
+    collection_items: int = 0
+
+    def consume_node(self, depth: int) -> None:
+        if depth > MAX_METADATA_DEPTH:
+            raise MetadataDecodeError(
+                f"metadata exceeds maximum nesting depth of {MAX_METADATA_DEPTH}"
+            )
+        if self.nodes + 1 > MAX_METADATA_NODES:
+            raise MetadataDecodeError(
+                f"metadata exceeds {MAX_METADATA_NODES} decoded nodes"
+            )
+        self.nodes += 1
+
+    def consume_string(self, value: str) -> None:
+        encoded_size = len(value.encode("utf-8", errors="surrogatepass"))
+        if self.string_bytes + encoded_size > MAX_METADATA_STRING_BYTES:
+            raise MetadataDecodeError(
+                f"metadata strings exceed {MAX_METADATA_STRING_BYTES} UTF-8 bytes"
+            )
+        self.string_bytes += encoded_size
+
+    def consume_collection(self, size: int) -> None:
+        if self.collection_items + size > MAX_METADATA_COLLECTION_ITEMS:
+            raise MetadataDecodeError(
+                f"metadata collections exceed {MAX_METADATA_COLLECTION_ITEMS} items"
+            )
+        self.collection_items += size
 
 
 @dataclass
@@ -61,13 +125,75 @@ def _safe_unparse(node: ast.AST | None) -> str:
         return ""
 
 
-def _literal(node: ast.AST | None) -> Any:
-    if node is None:
-        return None
-    try:
-        return ast.literal_eval(node)
-    except (ValueError, TypeError, SyntaxError):
-        return None
+def _node_line_number(node: ast.AST) -> int:
+    line_number = getattr(node, "lineno", 0)
+    return line_number if isinstance(line_number, int) else 0
+
+
+def _decode_metadata(
+    node: ast.AST,
+    budget: _MetadataBudget,
+    depth: int = 0,
+) -> MetadataValue:
+    budget.consume_node(depth)
+
+    if isinstance(node, ast.Constant):
+        constant_value = node.value
+        if constant_value is None or isinstance(constant_value, bool):
+            return constant_value
+        if isinstance(constant_value, str):
+            budget.consume_string(constant_value)
+            return constant_value
+        if isinstance(constant_value, int):
+            if abs(constant_value).bit_length() > MAX_METADATA_INTEGER_BITS:
+                raise MetadataDecodeError(
+                    f"metadata integer exceeds {MAX_METADATA_INTEGER_BITS} bits"
+                )
+            return constant_value
+        if isinstance(constant_value, float):
+            if not math.isfinite(constant_value):
+                raise MetadataDecodeError("metadata numbers must be finite")
+            return constant_value
+        raise MetadataDecodeError(
+            f"unsupported metadata value type: {type(constant_value).__name__}"
+        )
+
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        operand_value = _decode_metadata(node.operand, budget, depth + 1)
+        if isinstance(operand_value, bool) or not isinstance(operand_value, (int, float)):
+            raise MetadataDecodeError("unary metadata values must be numbers")
+        numeric_result = operand_value if isinstance(node.op, ast.UAdd) else -operand_value
+        if (
+            isinstance(numeric_result, int)
+            and abs(numeric_result).bit_length() > MAX_METADATA_INTEGER_BITS
+        ):
+            raise MetadataDecodeError(
+                f"metadata integer exceeds {MAX_METADATA_INTEGER_BITS} bits"
+            )
+        if isinstance(numeric_result, float) and not math.isfinite(numeric_result):
+            raise MetadataDecodeError("metadata numbers must be finite")
+        return numeric_result
+
+    if isinstance(node, (ast.List, ast.Tuple)):
+        budget.consume_collection(len(node.elts))
+        return [
+            _decode_metadata(item, budget, depth + 1)
+            for item in node.elts
+        ]
+
+    if isinstance(node, ast.Dict):
+        budget.consume_collection(len(node.keys))
+        mapping: dict[str, MetadataValue] = {}
+        for key_node, value_node in zip(node.keys, node.values, strict=True):
+            if key_node is None:
+                raise MetadataDecodeError("metadata dictionary expansion is not supported")
+            key = _decode_metadata(key_node, budget, depth + 1)
+            if not isinstance(key, str):
+                raise MetadataDecodeError("metadata dictionary keys must be strings")
+            mapping[key] = _decode_metadata(value_node, budget, depth + 1)
+        return mapping
+
+    raise MetadataDecodeError(f"unsupported metadata syntax: {type(node).__name__}")
 
 
 def _call_name(node: ast.AST) -> str:
@@ -91,40 +217,99 @@ def _is_tool_decorator(node: ast.AST) -> bool:
 def _tool_metadata(
     decorator: ast.AST,
     function: ast.FunctionDef | ast.AsyncFunctionDef,
-) -> tuple[str, str, dict[str, Any]]:
+) -> tuple[str, str, dict[str, Any], list[str]]:
     name = function.name
-    description = inspect.cleandoc(ast.get_docstring(function, clean=False) or "")
+    description = ""
     annotations: dict[str, Any] = {}
+    errors: list[str] = []
+    budget = _MetadataBudget()
+    explicit_description = False
 
-    if not isinstance(decorator, ast.Call):
-        return name, description, annotations
+    if isinstance(decorator, ast.Call):
+        if len(decorator.args) > 1:
+            errors.append("tool decorator accepts at most one positional metadata value")
+        if decorator.args:
+            try:
+                first = _decode_metadata(decorator.args[0], budget)
+                if isinstance(first, str):
+                    name = first
+                else:
+                    errors.append("positional tool name must be a string")
+            except MetadataDecodeError as exc:
+                errors.append(f"positional tool name: {exc}")
 
-    if decorator.args:
-        first = _literal(decorator.args[0])
-        if isinstance(first, str):
-            name = first
+        for keyword in decorator.keywords:
+            if keyword.arg is None:
+                errors.append("tool metadata keyword expansion is not supported")
+                continue
+            if keyword.arg == "name":
+                try:
+                    value = _decode_metadata(keyword.value, budget)
+                    if isinstance(value, str):
+                        name = value
+                    else:
+                        errors.append("tool name must be a string")
+                except MetadataDecodeError as exc:
+                    errors.append(f"tool name: {exc}")
+            elif keyword.arg == "description":
+                try:
+                    value = _decode_metadata(keyword.value, budget)
+                    if isinstance(value, str):
+                        description = inspect.cleandoc(value)
+                        explicit_description = True
+                    else:
+                        errors.append("tool description must be a string")
+                except MetadataDecodeError as exc:
+                    errors.append(f"tool description: {exc}")
+            elif keyword.arg == "annotations":
+                try:
+                    values = _decode_annotations(keyword.value, budget)
+                except MetadataDecodeError as exc:
+                    errors.append(f"annotations: {exc}")
+                    continue
+                for key, value in values.items():
+                    if key in _BOOLEAN_ANNOTATIONS and not isinstance(value, bool):
+                        errors.append(f"annotation {key!r} must be a boolean")
+                        continue
+                    annotations[key] = value
 
-    for keyword in decorator.keywords:
-        if keyword.arg == "name":
-            value = _literal(keyword.value)
-            if isinstance(value, str):
-                name = value
-        elif keyword.arg == "description":
-            value = _literal(keyword.value)
-            if isinstance(value, str):
-                description = inspect.cleandoc(value)
-        elif keyword.arg == "annotations":
-            value = _literal(keyword.value)
-            if isinstance(value, dict):
-                annotations = {str(key): item for key, item in value.items()}
-            elif isinstance(keyword.value, ast.Call):
-                annotations = {
-                    item.arg: _literal(item.value)
-                    for item in keyword.value.keywords
-                    if item.arg is not None
-                }
+    if not explicit_description:
+        raw_description = ast.get_docstring(function, clean=False) or ""
+        try:
+            budget.consume_string(raw_description)
+            description = inspect.cleandoc(raw_description)
+        except MetadataDecodeError as exc:
+            errors.append(f"tool description: {exc}")
 
-    return name, description, annotations
+    return name, description, annotations, errors
+
+
+def _decode_annotations(
+    node: ast.AST,
+    budget: _MetadataBudget,
+) -> dict[str, MetadataValue]:
+    if isinstance(node, ast.Dict):
+        value = _decode_metadata(node, budget)
+        if not isinstance(value, dict):
+            raise MetadataDecodeError("annotations must be a dictionary")
+        return value
+
+    if not isinstance(node, ast.Call):
+        raise MetadataDecodeError("annotations must be a dictionary or ToolAnnotations(...)")
+    constructor = _call_name(node.func)
+    if constructor != "ToolAnnotations" and not constructor.endswith(".ToolAnnotations"):
+        raise MetadataDecodeError("unsupported annotations constructor")
+    budget.consume_node(0)
+    if node.args:
+        raise MetadataDecodeError("ToolAnnotations positional values are not supported")
+    budget.consume_collection(len(node.keywords))
+    result: dict[str, MetadataValue] = {}
+    for keyword in node.keywords:
+        if keyword.arg is None:
+            raise MetadataDecodeError("ToolAnnotations keyword expansion is not supported")
+        budget.consume_string(keyword.arg)
+        result[keyword.arg] = _decode_metadata(keyword.value, budget, 1)
+    return result
 
 
 def _extract_parameters(function: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[Parameter, ...]:
@@ -263,7 +448,18 @@ def parse_project(target: str | Path) -> ParsedProject:
             for decorator in node.decorator_list:
                 if not _is_tool_decorator(decorator):
                     continue
-                name, description, annotations = _tool_metadata(decorator, node)
+                name, description, annotations, metadata_errors = _tool_metadata(
+                    decorator,
+                    node,
+                )
+                for message in metadata_errors:
+                    project.diagnostics.append(
+                        Diagnostic(
+                            relative,
+                            f"invalid tool metadata: {message}",
+                            line_number=_node_line_number(decorator),
+                        )
+                    )
                 project.tools.append(
                     ToolDefinition(
                         name=name,
