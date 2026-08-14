@@ -69,13 +69,14 @@ ScopeCheck reads source as text and parses it with Python's `ast` module. Target
 | Rule | Severity | What it means |
 | --- | --- | --- |
 | `MSC001` | Critical | Tool description contains instructions aimed at controlling or concealing behavior from the host model/user |
-| `MSC101` | High/Critical | `readOnlyHint=true` conflicts with reachable write, network, process, or dynamic-code behavior; process and dynamic code conflicts are Critical |
+| `MSC101` | High/Critical | `readOnlyHint=true` conflicts with justified state-changing behavior; process and dynamic code conflicts are Critical |
 | `MSC102` | High | Reachable network egress is missing from the tool description |
 | `MSC103` | High | Path-like input reaches filesystem operations without a recognized containment check |
 | `MSC104` | High | A path/root parameter defaults to `/` or `~` |
 | `MSC105` | Critical | Environment-derived data reaches a network call in the same reachable function |
 | `MSC106` | Critical | Process or shell execution is reachable |
 | `MSC107` | Critical | `eval` or `exec` is reachable |
+| `MSC108` | High | `openWorldHint=false` conflicts with reachable external network interaction |
 
 Observed capabilities are reported separately from findings. Filesystem reads are not automatically vulnerabilities; the contract comparison determines whether the behavior is inconsistent or insufficiently constrained.
 

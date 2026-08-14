@@ -57,6 +57,8 @@ NETWORK_PREFIXES = (
     "socket.",
     "urllib.request.",
 )
+NETWORK_READ_METHODS = {"get", "head", "options"}
+NETWORK_WRITE_METHODS = {"delete", "patch", "post", "put"}
 PROCESS_PREFIXES = ("asyncio.create_subprocess_", "subprocess.")
 PROCESS_CALLS = {"os.popen", "os.system"}
 PATH_GUARDS = {
@@ -184,6 +186,17 @@ def _call_capability(call: ast.Call, name: str) -> Capability | None:
     if name in {"eval", "exec", "builtins.eval", "builtins.exec"}:
         return Capability.CODE_EXECUTION
     return None
+
+
+def _network_method_kind(symbol: str) -> str:
+    if not symbol.startswith(("aiohttp.", "httpx.", "requests.")):
+        return "unknown"
+    method = symbol.rsplit(".", 1)[-1].lower()
+    if method in NETWORK_READ_METHODS:
+        return "read"
+    if method in NETWORK_WRITE_METHODS:
+        return "write"
+    return "unknown"
 
 
 def _environment_subscript(node: ast.Subscript, imports: dict[str, str]) -> bool:
@@ -355,15 +368,26 @@ def analyze_contract(
             )
             break
 
-    incompatible = {
+    state_changing = {
         Capability.CODE_EXECUTION,
         Capability.FILESYSTEM_WRITE,
-        Capability.NETWORK_EGRESS,
         Capability.PROCESS_EXECUTION,
     }
     if tool.read_only_claimed:
-        for capability in sorted(capabilities & incompatible, key=lambda item: item.value):
-            evidence = by_capability[capability]
+        conflicts = {
+            capability: by_capability[capability]
+            for capability in capabilities & state_changing
+        }
+        for item in observed:
+            if (
+                item.capability == Capability.NETWORK_EGRESS
+                and _network_method_kind(item.evidence.symbol) == "write"
+            ):
+                conflicts.setdefault(Capability.NETWORK_EGRESS, item.evidence)
+        for capability, evidence in sorted(
+            conflicts.items(),
+            key=lambda item: item[0].value,
+        ):
             severity = Severity.CRITICAL if capability in {
                 Capability.CODE_EXECUTION,
                 Capability.PROCESS_EXECUTION,
@@ -380,6 +404,20 @@ def analyze_contract(
                     evidence,
                 )
             )
+
+    if tool.closed_world_claimed and Capability.NETWORK_EGRESS in capabilities:
+        findings.append(
+            _finding(
+                "MSC108",
+                "Closed-world claim conflicts with network egress",
+                Severity.HIGH,
+                tool,
+                "openWorldHint is false, but external network interaction is reachable.",
+                "Remove external interaction or correct the annotation and disclose "
+                "the destination and data purpose.",
+                by_capability[Capability.NETWORK_EGRESS],
+            )
+        )
 
     if Capability.NETWORK_EGRESS in capabilities:
         disclosed = re.search(

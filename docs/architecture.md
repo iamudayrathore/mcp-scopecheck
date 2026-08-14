@@ -73,6 +73,20 @@ Capabilities are facts about code structure; they are not automatically vulnerab
 
 Every finding carries a file, line, and symbol. Rules should prefer a narrow, explainable result over a high-volume keyword match.
 
+MCP tool annotations are untrusted declarations, not enforcement. ScopeCheck
+accepts the Python-style snake_case and protocol-style camelCase spellings for
+`readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint`, then
+stores their canonical camelCase form. Conflicting aliases invalidate that hint
+and produce an incomplete-audit diagnostic rather than silently choosing one.
+
+`MSC101` compares `readOnlyHint=true` only with behavior ScopeCheck can justify
+as state-changing: filesystem writes, process or dynamic-code execution, and
+known mutating HTTP methods (`POST`, `PUT`, `PATCH`, and `DELETE`). Known `GET`,
+`HEAD`, and `OPTIONS` calls do not create a read-only conflict. Unknown network
+methods remain network capabilities but are not guessed to be writes.
+`MSC108` separately compares any reachable external network interaction with
+`openWorldHint=false`.
+
 `MSC103` requires a recognized containment comparison such as `relative_to`, `is_relative_to`, or `commonpath`; path normalization with `resolve()` alone is not treated as containment. The rule still does not prove that a guard dominates a filesystem sink or compares against the correct trusted root.
 
 `MSC105` follows direct environment reads and simple name-to-name or payload assignments in lexical order within one reachable function. It is not control-flow-sensitive, interprocedural, field-sensitive, or a general taint engine.

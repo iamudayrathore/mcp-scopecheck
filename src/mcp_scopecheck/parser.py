@@ -43,16 +43,17 @@ MetadataValue: TypeAlias = (
     | dict[str, "MetadataValue"]
 )
 
-_BOOLEAN_ANNOTATIONS = {
-    "destructiveHint",
-    "destructive_hint",
-    "idempotentHint",
-    "idempotent_hint",
-    "openWorldHint",
-    "open_world_hint",
-    "readOnlyHint",
-    "read_only_hint",
+_ANNOTATION_ALIASES = {
+    "readOnlyHint": ("readOnlyHint", "read_only_hint"),
+    "destructiveHint": ("destructiveHint", "destructive_hint"),
+    "idempotentHint": ("idempotentHint", "idempotent_hint"),
+    "openWorldHint": ("openWorldHint", "open_world_hint"),
 }
+_BOOLEAN_ANNOTATIONS = frozenset(
+    alias
+    for aliases in _ANNOTATION_ALIASES.values()
+    for alias in aliases
+)
 
 
 class ParseTargetError(ValueError):
@@ -220,7 +221,7 @@ def _tool_metadata(
 ) -> tuple[str, str, dict[str, Any], list[str]]:
     name = function.name
     description = ""
-    annotations: dict[str, Any] = {}
+    decoded_annotations: dict[str, Any] = {}
     errors: list[str] = []
     budget = _MetadataBudget()
     explicit_description = False
@@ -271,7 +272,7 @@ def _tool_metadata(
                     if key in _BOOLEAN_ANNOTATIONS and not isinstance(value, bool):
                         errors.append(f"annotation {key!r} must be a boolean")
                         continue
-                    annotations[key] = value
+                    decoded_annotations[key] = value
 
     if not explicit_description:
         raw_description = ast.get_docstring(function, clean=False) or ""
@@ -281,7 +282,38 @@ def _tool_metadata(
         except MetadataDecodeError as exc:
             errors.append(f"tool description: {exc}")
 
+    annotations, alias_errors = _normalize_annotations(decoded_annotations)
+    errors.extend(alias_errors)
     return name, description, annotations, errors
+
+
+def _normalize_annotations(
+    values: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    aliases = {
+        alias
+        for annotation_aliases in _ANNOTATION_ALIASES.values()
+        for alias in annotation_aliases
+    }
+    normalized = {
+        key: value
+        for key, value in values.items()
+        if key not in aliases
+    }
+    errors: list[str] = []
+    for canonical, (camel_case, snake_case) in _ANNOTATION_ALIASES.items():
+        present = [alias for alias in (camel_case, snake_case) if alias in values]
+        if not present:
+            continue
+        if len(present) == 2 and values[camel_case] != values[snake_case]:
+            errors.append(
+                f"conflicting annotation aliases for {canonical!r}: "
+                f"{camel_case}={values[camel_case]!r}, "
+                f"{snake_case}={values[snake_case]!r}"
+            )
+            continue
+        normalized[canonical] = values[present[0]]
+    return normalized, errors
 
 
 def _decode_annotations(

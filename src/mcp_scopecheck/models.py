@@ -64,6 +64,10 @@ class ToolDefinition:
         return self.annotations.get("readOnlyHint") is True
 
     @property
+    def closed_world_claimed(self) -> bool:
+        return self.annotations.get("openWorldHint") is False
+
+    @property
     def key(self) -> str:
         """Stable per-report identity that does not assume tool names are unique."""
 

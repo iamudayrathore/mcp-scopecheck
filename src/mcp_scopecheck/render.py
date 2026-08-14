@@ -21,6 +21,12 @@ _BIDI_CONTROLS = frozenset(
     }
 )
 _UNICODE_LINE_CONTROLS = frozenset({"\u2028", "\u2029"})
+_DISPLAYED_HINTS = (
+    "readOnlyHint",
+    "destructiveHint",
+    "idempotentHint",
+    "openWorldHint",
+)
 
 
 def escape_terminal_text(value: object) -> str:
@@ -74,9 +80,11 @@ def render_report(report: AuditReport) -> str:
             parameters = (
                 ", ".join(display(parameter.name) for parameter in tool.parameters) or "none"
             )
-            claims = []
-            if tool.read_only_claimed:
-                claims.append("readOnlyHint=true")
+            claims = [
+                f"{key}={str(tool.annotations[key]).lower()}"
+                for key in _DISPLAYED_HINTS
+                if isinstance(tool.annotations.get(key), bool)
+            ]
             claim_text = ", ".join(claims) or "none"
             capabilities = sorted(
                 {item.capability.value for item in report.capabilities.get(tool.key, [])}
