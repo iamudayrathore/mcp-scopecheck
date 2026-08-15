@@ -20,6 +20,8 @@
   corpus, contradiction handling, and narrow static destination evidence.
 - Defined and tested a no-follow symlink policy across Python 3.11–3.13, and made
   single-file reports display the requested file.
+- Bound manual publication to an owner-approved full commit SHA on `main` with
+  successful CI for that exact SHA, and isolated OIDC from source and build jobs.
 - Kept the CLI, plain-text report format, exit-code contract, and zero runtime
   dependencies compatible with `0.1.1`.
 

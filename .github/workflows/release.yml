@@ -7,51 +7,231 @@ on:
         description: Annotated release tag to publish (for example, v0.1.2)
         required: true
         type: string
+      commit_sha:
+        description: Owner-approved full 40-character commit SHA
+        required: true
+        type: string
 
 permissions: {}
 
 jobs:
-  publish:
-    name: Publish tagged distributions
+  verify_source:
+    name: Verify reviewed source and CI
     runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/p/mcp-scopecheck
     permissions:
+      actions: read
       contents: read
-      id-token: write
+    outputs:
+      commit_sha: ${{ steps.validated.outputs.commit_sha }}
+      tag: ${{ steps.validated.outputs.tag }}
+      version: ${{ steps.validated.outputs.version }}
     steps:
-      - name: Check out the requested tag
+      - name: Check out trusted release controls from main
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ inputs.tag }}
+          ref: ${{ github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
 
-      - name: Verify annotated tag and package version
+      - name: Require dispatch from current main
         env:
+          DISPATCH_REF: ${{ github.ref }}
+          DISPATCH_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${DISPATCH_REF}" = "refs/heads/main"
+          git fetch --force --prune origin \
+            "+refs/heads/main:refs/remotes/origin/main"
+          test "$(git rev-parse HEAD)" = "${DISPATCH_SHA}"
+          test "${DISPATCH_SHA}" = "$(git rev-parse refs/remotes/origin/main)"
+
+      - name: Verify tag, commit, version, ancestry, and exact-SHA CI
+        env:
+          EXPECTED_SHA: ${{ inputs.commit_sha }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: >-
+          python scripts/verify_release_source.py
+          --repository .
+          --tag "${RELEASE_TAG}"
+          --commit-sha "${EXPECTED_SHA}"
+
+      - name: Expose validated immutable inputs
+        id: validated
+        env:
+          EXPECTED_SHA: ${{ inputs.commit_sha }}
           RELEASE_TAG: ${{ inputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
-          test "${RELEASE_TAG}" != "${RELEASE_TAG#v}"
-          test "$(git cat-file -t "${RELEASE_TAG}")" = "tag"
-          test "$(git rev-parse "${RELEASE_TAG}^{commit}")" = "$(git rev-parse HEAD)"
-          package_version="$(python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
-          test "${RELEASE_TAG#v}" = "${package_version}"
+          printf 'commit_sha=%s\n' "${EXPECTED_SHA}" >> "${GITHUB_OUTPUT}"
+          printf 'tag=%s\n' "${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
+          printf 'version=%s\n' "${RELEASE_TAG#v}" >> "${GITHUB_OUTPUT}"
 
-      - name: Install pinned build tools
-        run: python -m pip install --disable-pip-version-check build==1.5.0 setuptools==84.0.0 wheel==0.48.0
+  build:
+    name: Build verified distributions once
+    needs: verify_source
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the validated full commit SHA
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ needs.verify_source.outputs.commit_sha }}
 
-      - name: Build distributions from the tagged source
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Install pinned development tools
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+
+      - name: Run release tests and quality gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest discover -s tests -v
+          PYTHONPYCACHEPREFIX="${RUNNER_TEMP}/scopecheck-pycache" python -m compileall -q src tests examples
+          python -m ruff check .
+          python -m mypy
+
+      - name: Build wheel and source distribution once
         run: python -m build --no-isolation --outdir dist
+
+      - name: Create immutable release manifest
+        env:
+          EXPECTED_SHA: ${{ needs.verify_source.outputs.commit_sha }}
+          EXPECTED_VERSION: ${{ needs.verify_source.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          dist = Path("dist")
+          version = os.environ["EXPECTED_VERSION"]
+          expected_names = {
+              f"mcp_scopecheck-{version}-py3-none-any.whl",
+              f"mcp_scopecheck-{version}.tar.gz",
+          }
+          files = sorted(path for path in dist.iterdir() if path.is_file())
+          if {path.name for path in files} != expected_names:
+              raise SystemExit("unexpected distribution file set")
+          manifest = {
+              "version": version,
+              "source_sha": os.environ["EXPECTED_SHA"],
+              "files": [
+                  {
+                      "name": path.name,
+                      "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                      "size": path.stat().st_size,
+                  }
+                  for path in files
+              ],
+          }
+          Path("release-manifest.json").write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload the exact release artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mcp-scopecheck-release-${{ needs.verify_source.outputs.commit_sha }}
+          path: |
+            dist/
+            release-manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    name: Publish verified distributions
+    needs: [verify_source, build]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/mcp-scopecheck
+    permissions:
+      actions: read
+      id-token: write
+    steps:
+      - name: Download the exact build artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mcp-scopecheck-release-${{ needs.verify_source.outputs.commit_sha }}
+          path: release-artifact
+
+      - name: Verify release manifest and checksums
+        env:
+          EXPECTED_SHA: ${{ needs.verify_source.outputs.commit_sha }}
+          EXPECTED_VERSION: ${{ needs.verify_source.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("release-artifact")
+          if {path.name for path in root.iterdir()} != {"dist", "release-manifest.json"}:
+              raise SystemExit("unexpected release artifact contents")
+          manifest_path = root / "release-manifest.json"
+          dist = root / "dist"
+          if manifest_path.is_symlink() or not manifest_path.is_file():
+              raise SystemExit("invalid release manifest path")
+          if dist.is_symlink() or not dist.is_dir():
+              raise SystemExit("invalid release distribution directory")
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          if manifest.get("source_sha") != os.environ["EXPECTED_SHA"]:
+              raise SystemExit("release manifest source SHA mismatch")
+          if manifest.get("version") != os.environ["EXPECTED_VERSION"]:
+              raise SystemExit("release manifest version mismatch")
+          expected_names = {
+              f"mcp_scopecheck-{os.environ['EXPECTED_VERSION']}-py3-none-any.whl",
+              f"mcp_scopecheck-{os.environ['EXPECTED_VERSION']}.tar.gz",
+          }
+          entries = manifest.get("files")
+          if not isinstance(entries, list):
+              raise SystemExit("release manifest has no file list")
+          actual = {path.name: path for path in dist.iterdir() if path.is_file()}
+          if set(actual) != expected_names or len(entries) != len(actual):
+              raise SystemExit("release distribution file set mismatch")
+          entry_names = {
+              entry.get("name") for entry in entries if isinstance(entry, dict)
+          }
+          if entry_names != expected_names or len(entry_names) != len(entries):
+              raise SystemExit("release manifest file set mismatch")
+          for entry in entries:
+              if not isinstance(entry, dict) or set(entry) != {"name", "sha256", "size"}:
+                  raise SystemExit("invalid release manifest entry")
+              path = actual.get(entry["name"])
+              if path is None or path.is_symlink():
+                  raise SystemExit("invalid release distribution path")
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              if digest != entry["sha256"] or path.stat().st_size != entry["size"]:
+                  raise SystemExit(f"release checksum mismatch: {path.name}")
+          PY
 
       - name: Publish distributions with PyPI Trusted Publishing
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
-          packages-dir: dist/
+          packages-dir: release-artifact/dist/

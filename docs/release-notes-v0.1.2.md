@@ -18,6 +18,11 @@ network calls.
   passes on Python 3.11, 3.12, and 3.13.
 - The regression proving that top-level target code never executes remains in
   the release suite.
+- Manual publication requires an annotated tag that peels to an owner-approved
+  full commit SHA on `main` and a successful CI run for that exact SHA. Source
+  verification and the single build run without OIDC; only the source-free
+  publishing job can request a Trusted Publishing token for the checksummed
+  artifact.
 
 ## Analyzer correctness
 
