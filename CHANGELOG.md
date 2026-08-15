@@ -10,6 +10,8 @@
   malformed bytes and encoding declarations now fail incomplete with exit `2`.
 - Added flow-sensitive network-client sinks and same-function environment-flow
   evidence for `httpx.Client`, `httpx.AsyncClient`, and `requests.Session`.
+- Replaced blanket network-module prefix matching with explicit direct sinks;
+  constructors, utilities, and unsupported context-manager factories stay clean.
 - Made reachability and import resolution lexical and statement-aware, including
   directly called nested sync/async helpers and function-local imports.
 - Replaced suffix-based filesystem detection with qualified APIs, proven

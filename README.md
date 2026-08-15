@@ -113,9 +113,10 @@ v0.1 intentionally supports:
 - Module-level `@mcp.tool`, `@mcp.tool()`, and equivalent `.tool` decorators
 - Direct same-file module and nested sync/async helper-call reachability
 - Module-level and function-local import aliases with statement-order shadowing
-- Qualified network-module calls and flow-proven `httpx.Client`,
-  `httpx.AsyncClient`, `requests.Session`, and `requests.sessions.Session` request
-  sinks
+- Explicit module-level `httpx`/`requests` request functions,
+  `urllib.request.urlopen`/`urlretrieve`, `socket.create_connection`, and request
+  methods on flow-proven `httpx.Client`, `httpx.AsyncClient`, `requests.Session`,
+  and `requests.sessions.Session` values
 - Qualified builtin, `pathlib`, `os`, and `shutil` filesystem operations with
   static open-mode/flag handling
 
@@ -123,6 +124,8 @@ It does **not** yet prove:
 
 - Cross-module, callback, function-alias, lambda, or class-method call paths
 - Runtime-only tool registration
+- `httpx.stream` or `aiohttp.request` context-manager factories, `http.client`
+  connection methods, or raw-socket instance traffic
 - TypeScript/JavaScript behavior
 - Authorization correctness
 - Whether all observed data actually leaves the process, except the narrow same-function flow implemented by `MSC105`

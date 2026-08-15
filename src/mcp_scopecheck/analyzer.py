@@ -60,17 +60,33 @@ OS_OPEN_WRITE_FLAGS = {
     "os.O_TRUNC",
     "os.O_WRONLY",
 }
-NETWORK_PREFIXES = (
-    "aiohttp.",
-    "http.client.",
-    "httpx.",
-    "requests.",
-    "socket.",
-    "urllib.request.",
-)
 NETWORK_READ_METHODS = {"get", "head", "options"}
 NETWORK_WRITE_METHODS = {"delete", "patch", "post", "put"}
-NETWORK_CLIENT_METHODS = {
+NETWORK_DIRECT_SINKS = frozenset(
+    {
+        "httpx.delete",
+        "httpx.get",
+        "httpx.head",
+        "httpx.options",
+        "httpx.patch",
+        "httpx.post",
+        "httpx.put",
+        "httpx.request",
+        "requests.delete",
+        "requests.get",
+        "requests.head",
+        "requests.options",
+        "requests.patch",
+        "requests.post",
+        "requests.put",
+        "requests.request",
+        "socket.create_connection",
+        "urllib.request.urlopen",
+        "urllib.request.urlretrieve",
+    }
+)
+NETWORK_CONTEXT_FACTORIES = frozenset({"aiohttp.request", "httpx.stream"})
+NETWORK_CLIENT_CONSTRUCTORS = {
     "httpx.Client": frozenset(
         {"delete", "get", "head", "options", "patch", "post", "put", "request", "send", "stream"}
     ),
@@ -383,15 +399,15 @@ def _call_capability(
         return Capability.FILESYSTEM_WRITE
     if name == "os.getenv" or name.endswith(".environ.get"):
         return Capability.ENVIRONMENT_READ
-    if name in NETWORK_CLIENT_METHODS:
+    if name in NETWORK_DIRECT_SINKS:
+        return Capability.NETWORK_EGRESS
+    if name in NETWORK_CLIENT_CONSTRUCTORS or name in NETWORK_CONTEXT_FACTORIES:
         return None
-    for constructor, methods in NETWORK_CLIENT_METHODS.items():
+    for constructor, methods in NETWORK_CLIENT_CONSTRUCTORS.items():
         instance_prefix = f"{constructor}()."
         if name.startswith(instance_prefix):
             method = name.removeprefix(instance_prefix)
             return Capability.NETWORK_EGRESS if method in methods else None
-    if name.startswith(NETWORK_PREFIXES):
-        return Capability.NETWORK_EGRESS
     if name in PROCESS_CALLS or name.startswith(PROCESS_PREFIXES):
         return Capability.PROCESS_EXECUTION
     if name in {"eval", "exec", "builtins.eval", "builtins.exec"}:
@@ -524,7 +540,7 @@ class _ExecutionVisitor(ast.NodeVisitor):
         if not isinstance(value, ast.Call):
             return None
         constructor = _qualified_name(value.func, self._imports_for_value(value))
-        return constructor if constructor in NETWORK_CLIENT_METHODS else None
+        return constructor if constructor in NETWORK_CLIENT_CONSTRUCTORS else None
 
     def _is_path_value(
         self,
@@ -582,14 +598,14 @@ class _ExecutionVisitor(ast.NodeVisitor):
         receiver = call.func.value
         if isinstance(receiver, ast.Name):
             constructor = self.clients.get(receiver.id)
-            if constructor and method in NETWORK_CLIENT_METHODS[constructor]:
+            if constructor and method in NETWORK_CLIENT_CONSTRUCTORS[constructor]:
                 return f"{receiver.id}.{method}"
             return None
         if isinstance(receiver, ast.Call):
             constructor = _qualified_name(receiver.func, imports)
             if (
-                constructor in NETWORK_CLIENT_METHODS
-                and method in NETWORK_CLIENT_METHODS[constructor]
+                constructor in NETWORK_CLIENT_CONSTRUCTORS
+                and method in NETWORK_CLIENT_CONSTRUCTORS[constructor]
             ):
                 return f"{constructor}().{method}"
         return None
@@ -726,7 +742,7 @@ class _ExecutionVisitor(ast.NodeVisitor):
         for item in node.names:
             name = item.asname or item.name.split(".")[0]
             self._shadow_name(name)
-            self.imports[name] = item.name
+            self.imports[name] = item.name if item.asname else name
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         if node.module is None:

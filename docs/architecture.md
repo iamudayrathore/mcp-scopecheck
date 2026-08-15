@@ -147,14 +147,21 @@ that a supported filesystem API is reached, but not whether it writes, so v0.1
 records the read capability as a lower bound. This may under-report a dynamic
 write and deliberately does not create a read-only/write contradiction.
 
-Network capability evidence includes qualified calls resolved beneath
-`requests`, `httpx`, `aiohttp`, `urllib.request`, `http.client`, and `socket`,
-plus supported request methods on flow-proven `httpx.Client`,
-`httpx.AsyncClient`, `requests.Session`, and `requests.sessions.Session`
-instances. Known client construction alone is not egress. Module-prefix matching
-is deliberately syntactic and can classify calls without proving their runtime
-transport; proven instance methods require a constructor binding that remains
-live at that statement.
+Network capability evidence uses a case-sensitive allowlist rather than module
+prefixes. Supported direct sinks are the standard request verbs and `request`
+functions on `httpx` and `requests`, `urllib.request.urlopen`,
+`urllib.request.urlretrieve`, and `socket.create_connection`. Supported request
+methods on flow-proven `httpx.Client`, `httpx.AsyncClient`, `requests.Session`,
+and `requests.sessions.Session` instances are also sinks. Constructors,
+request/configuration objects, local utilities, and unknown calls beneath a
+network-related module are not egress evidence.
+
+The context-manager factories `httpx.stream` and `aiohttp.request` are not
+classified in v0.1.2 because a bare factory call does not complete network I/O
+and the analyzer does not yet prove their context entry. `http.client`
+connection methods and raw-socket instance operations are likewise unmodeled;
+they are not guessed from method names. Proven instance methods require a known
+supported constructor binding that remains live at that statement.
 
 `MSC103` tracks exact path-like parameter names and common suffixes such as
 `*_path` through simple aliases, supported path transformations, and direct

@@ -438,7 +438,8 @@ def _imports(tree: ast.Module) -> dict[str, str]:
     for node in tree.body:
         if isinstance(node, ast.Import):
             for item in node.names:
-                aliases[item.asname or item.name.split(".")[0]] = item.name
+                bound_name = item.asname or item.name.split(".")[0]
+                aliases[bound_name] = item.name if item.asname else bound_name
         elif isinstance(node, ast.ImportFrom) and node.module:
             for item in node.names:
                 aliases[item.asname or item.name] = f"{node.module}.{item.name}"
