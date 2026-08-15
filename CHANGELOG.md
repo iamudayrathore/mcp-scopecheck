@@ -12,6 +12,8 @@
   evidence for `httpx.Client`, `httpx.AsyncClient`, and `requests.Session`.
 - Replaced blanket network-module prefix matching with explicit direct sinks;
   constructors, utilities, and unsupported context-manager factories stay clean.
+- Added the eight explicit `requests.api` request functions to the same sink and
+  rule semantics as their supported `requests` counterparts.
 - Made reachability and import resolution lexical and statement-aware, including
   directly called nested sync/async helpers and function-local imports.
 - Replaced suffix-based filesystem detection with qualified APIs, proven

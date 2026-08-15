@@ -113,7 +113,7 @@ v0.1 intentionally supports:
 - Module-level `@mcp.tool`, `@mcp.tool()`, and equivalent `.tool` decorators
 - Direct same-file module and nested sync/async helper-call reachability
 - Module-level and function-local import aliases with statement-order shadowing
-- Explicit module-level `httpx`/`requests` request functions,
+- Explicit module-level `httpx`, `requests`, and `requests.api` request functions,
   `urllib.request.urlopen`/`urlretrieve`, `socket.create_connection`, and request
   methods on flow-proven `httpx.Client`, `httpx.AsyncClient`, `requests.Session`,
   and `requests.sessions.Session` values

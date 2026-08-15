@@ -33,11 +33,11 @@ network calls.
   `httpx.Client`, `httpx.AsyncClient`, `requests.Session`, and
   `requests.sessions.Session` instances. Construction alone is not egress, and
   reassignment or deletion kills the binding.
-- Module-level egress now uses explicit `httpx`, `requests`, `urllib.request`,
-  and `socket` sink allowlists. Configuration/request objects, hostname helpers,
-  and other calls under those modules remain clean. The `httpx.stream` and
-  `aiohttp.request` context-manager factories are left unsupported until actual
-  context entry can be proven.
+- Module-level egress now uses explicit `httpx`, `requests`, `requests.api`,
+  `urllib.request`, and `socket` sink allowlists. Configuration/request objects,
+  hostname helpers, and other calls under those modules remain clean. The
+  `httpx.stream` and `aiohttp.request` context-manager factories are left
+  unsupported until actual context entry can be proven.
 - Lexical reachability excludes uncalled nested functions, lambdas, and class
   methods while following directly called nested sync/async helpers. Local import
   aliases and statement-order shadowing are resolved.

@@ -149,7 +149,7 @@ write and deliberately does not create a read-only/write contradiction.
 
 Network capability evidence uses a case-sensitive allowlist rather than module
 prefixes. Supported direct sinks are the standard request verbs and `request`
-functions on `httpx` and `requests`, `urllib.request.urlopen`,
+functions on `httpx`, `requests`, and `requests.api`, `urllib.request.urlopen`,
 `urllib.request.urlretrieve`, and `socket.create_connection`. Supported request
 methods on flow-proven `httpx.Client`, `httpx.AsyncClient`, `requests.Session`,
 and `requests.sessions.Session` instances are also sinks. Constructors,
