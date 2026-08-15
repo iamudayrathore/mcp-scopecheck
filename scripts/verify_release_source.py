@@ -21,6 +21,10 @@ SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 TAG_PATTERN = re.compile(r"v[0-9]+(?:\.[0-9]+){2}(?:[A-Za-z0-9._+-]*)?")
 CI_WORKFLOW_FILE = "ci.yml"
 CI_WORKFLOW_PATH = ".github/workflows/ci.yml"
+NEXT_LINK_PATTERN = re.compile(
+    r"\brel\s*=\s*(?:\"[^\"]*\bnext\b[^\"]*\"|'[^']*\bnext\b[^']*'|next\b)",
+    re.IGNORECASE,
+)
 
 
 class ReleaseVerificationError(RuntimeError):
@@ -89,19 +93,47 @@ def verify_repository(repository: Path, tag: str, commit_sha: str) -> str:
 def _successful_ci_run(payload: object, commit_sha: str) -> bool:
     if not isinstance(payload, dict):
         return False
-    runs = payload.get("workflow_runs")
-    if not isinstance(runs, list):
+    total_count = payload.get("total_count")
+    if type(total_count) is not int or total_count != 1:
         return False
-    return any(
-        isinstance(run, dict)
+    runs = payload.get("workflow_runs")
+    if not isinstance(runs, list) or len(runs) != total_count:
+        return False
+    run = runs[0]
+    if not isinstance(run, dict):
+        return False
+    return (
+        type(run.get("head_sha")) is str
         and run.get("head_sha") == commit_sha
+        and type(run.get("head_branch")) is str
         and run.get("head_branch") == "main"
+        and type(run.get("event")) is str
         and run.get("event") == "push"
+        and type(run.get("status")) is str
         and run.get("status") == "completed"
+        and type(run.get("conclusion")) is str
         and run.get("conclusion") == "success"
+        and type(run.get("path")) is str
         and run.get("path") == CI_WORKFLOW_PATH
-        for run in runs
     )
+
+
+def _response_has_next_page(headers: object) -> bool:
+    """Inspect every case-insensitive Link header for a next-page relation."""
+
+    items = getattr(headers, "items", None)
+    if not callable(items):
+        raise ReleaseVerificationError("unable to inspect CI response headers")
+    for name, value in items():
+        if not isinstance(name, str):
+            raise ReleaseVerificationError("malformed CI response header name")
+        if name.casefold() != "link":
+            continue
+        if not isinstance(value, str):
+            raise ReleaseVerificationError("malformed CI Link response header")
+        if NEXT_LINK_PATTERN.search(value) is not None:
+            return True
+    return False
 
 
 def verify_ci(
@@ -137,12 +169,28 @@ def verify_ci(
     )
     try:
         with opener(request, timeout=30) as response:
+            if type(getattr(response, "status", None)) is not int or response.status != 200:
+                raise ReleaseVerificationError("CI API request did not return HTTP 200")
+            headers = getattr(response, "headers", None)
+            if _response_has_next_page(headers):
+                raise ReleaseVerificationError("CI API evidence is paginated")
             payload = json.load(response)
-    except (OSError, urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError) as exc:
+    except ReleaseVerificationError:
+        raise
+    except (
+        OSError,
+        UnicodeError,
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        json.JSONDecodeError,
+    ) as exc:
+        if isinstance(exc, urllib.error.HTTPError):
+            exc.close()
         raise ReleaseVerificationError("unable to verify the required CI run") from exc
     if not _successful_ci_run(payload, commit_sha):
         raise ReleaseVerificationError(
-            "no successful completed main-push CI run exists for the approved commit SHA"
+            "CI evidence is incomplete, ambiguous, or does not contain exactly one "
+            "successful completed main-push run for the approved commit SHA"
         )
 
 

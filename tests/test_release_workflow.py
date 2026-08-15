@@ -44,11 +44,19 @@ class ReleaseWorkflowPolicyTests(unittest.TestCase):
             "approved commit is not reachable from origin/main",
             "release tag does not match the package version",
             '"head_sha": commit_sha',
+            'payload.get("total_count")',
+            "total_count != 1",
+            "len(runs) != total_count",
+            "_response_has_next_page(headers)",
             'run.get("conclusion") == "success"',
             'run.get("path") == CI_WORKFLOW_PATH',
         ):
             self.assertIn(required, script)
         self.assertIn('test "${DISPATCH_REF}" = "refs/heads/main"', self.verify)
+        self.assertLess(
+            self.verify.index("Verify tag, commit, version, ancestry, and exact-SHA CI"),
+            self.verify.index("Expose validated immutable inputs"),
+        )
 
     def test_oidc_is_isolated_to_source_free_publish_job(self) -> None:
         self.assertNotIn("id-token: write", self.verify)

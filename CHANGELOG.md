@@ -28,6 +28,8 @@
   single-file reports display the requested file.
 - Bound manual publication to an owner-approved full commit SHA on `main` with
   successful CI for that exact SHA, and isolated OIDC from source and build jobs.
+- Made the publication gate reject paginated, count-inconsistent, incomplete, or
+  multiple GitHub Actions results instead of accepting ambiguous CI evidence.
 - Kept the CLI, plain-text report format, exit-code contract, and zero runtime
   dependencies compatible with `0.1.1`.
 

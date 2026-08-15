@@ -26,6 +26,9 @@ network calls.
   verification and the single build run without OIDC; only the source-free
   publishing job can request a Trusted Publishing token for the checksummed
   artifact.
+- CI approval evidence must be one complete, unpaginated GitHub Actions response
+  with an integer count of one and exactly one fully matching successful run;
+  missing, malformed, count-inconsistent, or multiple results fail closed.
 
 ## Analyzer correctness
 
