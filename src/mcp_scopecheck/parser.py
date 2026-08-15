@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import ast
 import inspect
+import io
 import math
 import os
+import tokenize
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -71,6 +73,10 @@ class MetadataDecodeError(ValueError):
 
 class AnalysisBudgetExceeded(ValueError):
     """Raised internally when a total static-analysis budget is exhausted."""
+
+
+class SourceDecodeError(ValueError):
+    """Raised when Python source bytes cannot be decoded without loss."""
 
 
 @dataclass
@@ -140,6 +146,25 @@ def _safe_unparse(node: ast.AST | None) -> str:
 def _node_line_number(node: ast.AST) -> int:
     line_number = getattr(node, "lineno", 0)
     return line_number if isinstance(line_number, int) else 0
+
+
+def _decode_python_source(source: bytes) -> str:
+    """Decode Python bytes according to PEP 263 without replacement characters."""
+
+    try:
+        encoding, _ = tokenize.detect_encoding(io.BytesIO(source).readline)
+    except (SyntaxError, UnicodeDecodeError) as exc:
+        detail = exc.msg if isinstance(exc, SyntaxError) else str(exc)
+        raise SourceDecodeError(f"invalid Python source encoding: {detail}") from exc
+    try:
+        return source.decode(encoding, errors="strict")
+    except LookupError as exc:
+        raise SourceDecodeError(f"invalid Python source encoding: unknown {encoding!r}") from exc
+    except UnicodeDecodeError as exc:
+        raise SourceDecodeError(
+            f"invalid Python source encoding: cannot decode as {encoding} "
+            f"at byte offset {exc.start}"
+        ) from exc
 
 
 def _decode_metadata(
@@ -619,7 +644,24 @@ def parse_project(target: str | Path) -> ParsedProject:
             ):
                 return _finish_project(project)
             continue
-        if total_source_bytes + size > MAX_TOTAL_SOURCE_BYTES:
+        try:
+            with path.open("rb") as source_file:
+                source = source_file.read(MAX_SOURCE_BYTES + 1)
+        except OSError as exc:
+            if not _add_diagnostic(
+                project,
+                Diagnostic(relative, f"unable to read file: {exc}"),
+            ):
+                return _finish_project(project)
+            continue
+        if len(source) > MAX_SOURCE_BYTES:
+            if not _add_diagnostic(
+                project,
+                Diagnostic(relative, f"skipped: file exceeds {MAX_SOURCE_BYTES} bytes"),
+            ):
+                return _finish_project(project)
+            continue
+        if total_source_bytes + len(source) > MAX_TOTAL_SOURCE_BYTES:
             _add_diagnostic(
                 project,
                 Diagnostic(
@@ -629,19 +671,15 @@ def parse_project(target: str | Path) -> ParsedProject:
                 ),
             )
             return _finish_project(project)
-        total_source_bytes += size
-
-        try:
-            content = path.read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
-            if not _add_diagnostic(
-                project,
-                Diagnostic(relative, f"unable to read file: {exc}"),
-            ):
-                return _finish_project(project)
-            continue
+        total_source_bytes += len(source)
 
         project.files_scanned += 1
+        try:
+            content = _decode_python_source(source)
+        except SourceDecodeError as exc:
+            if not _add_diagnostic(project, Diagnostic(relative, str(exc))):
+                return _finish_project(project)
+            continue
         try:
             tree = ast.parse(content, filename=relative)
         except SyntaxError as exc:

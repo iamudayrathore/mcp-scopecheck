@@ -6,6 +6,8 @@
   target-controlled report and normal CLI-error field.
 - Bounded static metadata decoding, cumulative source/AST work, AST depth, and
   diagnostic collection; incomplete audits continue to exit `2`.
+- Replaced lossy UTF-8 source decoding with strict PEP 263 encoding detection;
+  malformed bytes and encoding declarations now fail incomplete with exit `2`.
 - Added flow-sensitive network-client sinks and same-function environment-flow
   evidence for `httpx.Client`, `httpx.AsyncClient`, and `requests.Session`.
 - Made reachability and import resolution lexical and statement-aware, including

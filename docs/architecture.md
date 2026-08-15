@@ -52,13 +52,19 @@ other machine-readable report format.
 - Calls, comprehensions, sets, dictionary expansion, and other executable or
   unsupported metadata syntax are rejected. `ToolAnnotations(...)` is handled
   as an explicitly supported static keyword container; it is never invoked.
-- Syntax/read failures are reported as diagnostics instead of silently ignored.
+- Source-byte limits apply before decoding. Python source is decoded strictly
+  using PEP 263 coding-cookie and UTF-8 BOM rules; replacement or ignored
+  characters are never introduced.
+- Encoding-declaration, decode, syntax, and read failures are reported as
+  diagnostics instead of silently ignored.
 - A symlink supplied directly as a file or directory target is rejected.
   Symlinked files and directories encountered inside a directory target are
   skipped, and traversal explicitly disables link following.
 
 Invalid or over-budget tool metadata keeps the discovered tool visible but adds
 a deterministic diagnostic, makes the audit incomplete, and yields exit `2`.
+Undecodable source is not partially analyzed and produces the same incomplete
+exit contract.
 File-count, cumulative-byte, AST-node, AST-depth, and diagnostic-count overruns
 likewise stop analysis with a stable `analysis incomplete` diagnostic and exit
 `2`; partial results are never presented as a complete clean audit. The

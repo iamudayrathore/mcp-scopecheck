@@ -70,7 +70,12 @@ That focus complements manifest scanners and runtime testing tools. It does not 
 
 ## Security invariant
 
-ScopeCheck reads source as text and parses it with Python's `ast` module. Target modules are never imported, decorators are never invoked, and MCP servers are never started. A regression test places a real top-level side effect in a fixture and proves it does not execute during an audit.
+ScopeCheck reads bounded source bytes, decodes them strictly using Python's PEP
+263 encoding rules, and parses the resulting text with Python's `ast` module.
+Decode failures make the audit incomplete rather than substituting replacement
+characters. Target modules are never imported, decorators are never invoked,
+and MCP servers are never started. A regression test places a real top-level
+side effect in a fixture and proves it does not execute during an audit.
 
 ## What v0.1 detects
 

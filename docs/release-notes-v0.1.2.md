@@ -10,6 +10,9 @@ network calls.
   are rendered inert throughout reports and normal CLI errors.
 - Tool metadata is decoded by a bounded JSON-like AST evaluator rather than
   `ast.literal_eval`; unsupported or over-budget values produce diagnostics.
+- Python source is read as bounded bytes and decoded strictly according to PEP
+  263. Valid coding cookies preserve source text, while malformed bytes, unknown
+  encodings, and BOM/cookie conflicts make the audit incomplete with exit `2`.
 - Audits now enforce cumulative source-byte, AST-node, AST-depth, and diagnostic
   limits in addition to the existing file caps. Any overrun is incomplete and
   exits `2`.
