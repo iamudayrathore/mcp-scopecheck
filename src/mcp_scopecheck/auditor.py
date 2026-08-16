@@ -188,16 +188,17 @@ def audit(target: str | Path) -> AuditReport:
     notifications = []
     tools_by_name = {tool.name: tool for tool in project.tools}
     for edge in unresolved_edges:
-        tool = tools_by_name.get(edge.tool_name)
-        if tool is None or not any(
-            _is_path_parameter_name(parameter.name) for parameter in tool.parameters
+        unresolved_tool = tools_by_name.get(edge.tool_name)
+        if unresolved_tool is None or not any(
+            _is_path_parameter_name(parameter.name)
+            for parameter in unresolved_tool.parameters
         ):
             continue
         notifications.append(
             AnalysisNotification(
                 "MSC103-GUARD-UNKNOWN",
                 "MSC103 was not inferred across unresolved path lineage for tool "
-                f"{tool.name!r}",
+                f"{unresolved_tool.name!r}",
                 edge.source_file,
                 edge.line_number,
             )

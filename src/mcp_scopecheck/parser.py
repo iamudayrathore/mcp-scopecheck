@@ -363,21 +363,21 @@ def _potential_registrations(
                 )
             )
 
-    for call in ast.walk(tree):
-        if not isinstance(call, ast.Call) or id(call) in decorator_ids:
+    for walked_node in ast.walk(tree):
+        if not isinstance(walked_node, ast.Call) or id(walked_node) in decorator_ids:
             continue
-        name = _call_name(call.func)
+        name = _call_name(walked_node.func)
         if name.endswith(".add_tool"):
             reason = "add_tool registration"
-        elif name.endswith(".tool") and call.args:
+        elif name.endswith(".tool") and walked_node.args:
             reason = "runtime tool registration"
         else:
             continue
         registrations.append(
-            PotentialRegistration(
-                source_file,
-                _node_line_number(call),
-                _safe_unparse(call.func),
+                PotentialRegistration(
+                    source_file,
+                    _node_line_number(walked_node),
+                    _safe_unparse(walked_node.func),
                 reason,
             )
         )

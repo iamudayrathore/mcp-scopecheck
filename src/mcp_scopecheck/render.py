@@ -124,13 +124,14 @@ def render_report(report: AuditReport) -> str:
     if not completeness.resolved_edges:
         lines.append("    none")
     else:
-        for edge in completeness.resolved_edges:
+        for resolved_edge in completeness.resolved_edges:
             lines.append(
-                f"    {display(edge.tool_name)}: {display(edge.caller)} -> "
-                f"{display(edge.target_symbol)} at "
-                f"{display(edge.source_file)}:{edge.line_number} "
-                f"[{display(edge.call_expression)}; target "
-                f"{display(edge.target_file)}]"
+                f"    {display(resolved_edge.tool_name)}: "
+                f"{display(resolved_edge.caller)} -> "
+                f"{display(resolved_edge.target_symbol)} at "
+                f"{display(resolved_edge.source_file)}:{resolved_edge.line_number} "
+                f"[{display(resolved_edge.call_expression)}; target "
+                f"{display(resolved_edge.target_file)}]"
             )
 
     lines.append(
@@ -139,14 +140,19 @@ def render_report(report: AuditReport) -> str:
     if not completeness.unresolved_edges:
         lines.append("    none")
     else:
-        for edge in completeness.unresolved_edges:
-            candidate = f"; candidate {display(edge.candidate)}" if edge.candidate else ""
+        for unresolved_edge in completeness.unresolved_edges:
+            candidate = (
+                f"; candidate {display(unresolved_edge.candidate)}"
+                if unresolved_edge.candidate
+                else ""
+            )
             lines.extend(
                 [
-                    f"    {display(edge.tool_name)}: {display(edge.caller)} at "
-                    f"{display(edge.source_file)}:{edge.line_number}",
-                    f"      Call: {display(edge.call_expression)}",
-                    f"      Reason: {display(edge.reason.value)}{candidate}",
+                    f"    {display(unresolved_edge.tool_name)}: "
+                    f"{display(unresolved_edge.caller)} at "
+                    f"{display(unresolved_edge.source_file)}:{unresolved_edge.line_number}",
+                    f"      Call: {display(unresolved_edge.call_expression)}",
+                    f"      Reason: {display(unresolved_edge.reason.value)}{candidate}",
                 ]
             )
 

@@ -665,7 +665,7 @@ def analyze_reachability(
                 continue
             callee = execution.call_edges_by_call.get(id(node))
             if callee is not None:
-                edge = ResolvedCallEdge(
+                resolved_edge = ResolvedCallEdge(
                     tool.name,
                     record.source_file,
                     _line_number(node),
@@ -676,15 +676,15 @@ def analyze_reachability(
                 )
                 resolved[
                     (
-                        edge.tool_name,
-                        edge.source_file,
-                        edge.line_number,
-                        edge.caller,
-                        edge.call_expression,
-                        edge.target_file,
-                        edge.target_symbol,
+                        resolved_edge.tool_name,
+                        resolved_edge.source_file,
+                        resolved_edge.line_number,
+                        resolved_edge.caller,
+                        resolved_edge.call_expression,
+                        resolved_edge.target_file,
+                        resolved_edge.target_symbol,
                     )
-                ] = edge
+                ] = resolved_edge
                 next_hops = cross_module_hops + int(callee.source_file != record.source_file)
                 if callee.source_file != record.source_file and (
                     any(isinstance(argument, ast.Starred) for argument in node.args)
