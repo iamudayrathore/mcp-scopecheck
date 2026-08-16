@@ -208,12 +208,15 @@ NETWORK_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
 )
 NETWORK_INTERACTION = re.compile(
-    r"\b(?:call|connect|contact|download|fetch|forward|post|publish|quer(?:y|ies)|"
+    r"\b(?:call|connect|contact|download|fetch|forward|get|post|publish|quer(?:y|ies)|"
     r"request|retrieve|send|transmit|upload)\w*\b",
     re.I,
 )
 EXTERNAL_TARGET = re.compile(
     r"\b(?:external|internet|online|public\s+web|remote|third[- ]party)\b|"
+    r"\b(?:download\s+)?url\b|"
+    r"\b(?:public\s+|hosted\s+)?(?:api\s+)?endpoint\b|"
+    r"\bhosted\s+[a-z0-9-]+\s+service\b|"
     r"\b(?:api\.|hooks\.|webhook\.)[a-z0-9.-]+\b|"
     r"\b[a-z0-9-]+\.(?:com|dev|io|net|org)(?:\b|/)",
     re.I,

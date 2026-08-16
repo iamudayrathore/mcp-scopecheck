@@ -136,6 +136,20 @@ class DescriptionContractTests(unittest.TestCase):
 
         self.assertIsNone(_msc102(report))
 
+    def test_url_endpoint_and_hosted_service_disclosures_are_recognized(self) -> None:
+        descriptions = (
+            "Download an exported archive from the URL returned by list_exports.",
+            "Gets autocomplete suggestions from the public suggestion endpoint.",
+            "Downloads a message attachment from a hosted chat service and returns a URL.",
+        )
+        for description in descriptions:
+            with self.subTest(description=description):
+                report = _audit_description(
+                    description,
+                    "https://service.example.invalid/v1",
+                )
+                self.assertIsNone(_msc102(report))
+
 
 if __name__ == "__main__":
     unittest.main()
