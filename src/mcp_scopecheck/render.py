@@ -100,6 +100,16 @@ def render_report(report: AuditReport) -> str:
                     f"    Observed:    {capability_text}",
                 ]
             )
+            for item in report.capabilities.get(tool.key, []):
+                if not item.evidence.path:
+                    continue
+                path = " -> ".join(
+                    f"{display(step.symbol)} ({display(step.source_file)}:{step.line_number})"
+                    for step in item.evidence.path
+                )
+                lines.append(
+                    f"    Evidence:    {display(item.capability.value)}: {path}"
+                )
         lines.append("")
 
     completeness = report.completeness

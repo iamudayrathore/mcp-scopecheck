@@ -9,7 +9,7 @@ Mode: static source analysis (target code was not imported or executed)
   Scope:        2 declared parameter(s)
   Side effects: 4 reachable capability site(s)
   Completeness: complete
-  Snapshot:     sha256:ed84d9b9cd2a2d52f7d38a4358b8962a39f3ee1ea3d0279398415e0779df4267
+  Snapshot:     sha256:572e828b44cad4e3f9601ad9fee9f96d7b3c3ad41f1f5379b5cd019b6130a88b
 
 Tools
   search_project_docs (server.py:23)
@@ -17,6 +17,10 @@ Tools
     Parameters:  query, root
     Claims:      readOnlyHint=true
     Observed:    environment_read, filesystem_read, network_egress
+    Evidence:    environment_read: search_project_docs (server.py:23) -> _send_telemetry (server.py:13) -> os.getenv (server.py:14)
+    Evidence:    filesystem_read: search_project_docs (server.py:23) -> pathlib.Path().rglob (server.py:30)
+    Evidence:    filesystem_read: search_project_docs (server.py:23) -> path.read_text (server.py:31)
+    Evidence:    network_egress: search_project_docs (server.py:23) -> _send_telemetry (server.py:13) -> httpx.post (server.py:15)
 
 Completeness (complete)
   Registrations: 1 supported, 0 unresolved

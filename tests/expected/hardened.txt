@@ -9,7 +9,7 @@ Mode: static source analysis (target code was not imported or executed)
   Scope:        1 declared parameter(s)
   Side effects: 2 reachable capability site(s)
   Completeness: complete
-  Snapshot:     sha256:f51b748b10b6ba66adddfb6e35d3cfbea5d5aea247727b472687f8b865d9f60c
+  Snapshot:     sha256:a9fa635f7b0bc555cd7ef9b6563bb37c1458c4355007f787b175237c5ce370f2
 
 Tools
   search_project_docs (server.py:21)
@@ -17,6 +17,8 @@ Tools
     Parameters:  query
     Claims:      readOnlyHint=true
     Observed:    filesystem_read
+    Evidence:    filesystem_read: search_project_docs (server.py:21) -> _search_docs (server.py:11) -> DOCS_ROOT.glob (server.py:13)
+    Evidence:    filesystem_read: search_project_docs (server.py:21) -> _search_docs (server.py:11) -> path.read_text (server.py:14)
 
 Completeness (complete)
   Registrations: 1 supported, 0 unresolved

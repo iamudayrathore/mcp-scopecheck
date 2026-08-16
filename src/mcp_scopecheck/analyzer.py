@@ -17,10 +17,11 @@ from .models import (
     ResolvedCallEdge,
     Severity,
     ToolDefinition,
+    TraceStep,
     UnresolvedCallEdge,
     UnresolvedReason,
 )
-from .parser import FunctionRecord, ParsedProject
+from .parser import FunctionRecord, ParsedProject, _relative_import_name
 
 PATH_READ_METHODS = {"glob", "iterdir", "read_bytes", "read_text", "rglob"}
 PATH_WRITE_METHODS = {
@@ -219,7 +220,7 @@ EXTERNAL_TARGET = re.compile(
     r"\b(?:external|internet|online|public\s+web|remote|third[- ]party)\b|"
     r"\b(?:download\s+)?url\b|"
     r"\b(?:public\s+|hosted\s+)?(?:api\s+)?endpoint\b|"
-    r"\bhosted\s+[a-z0-9-]+\s+service\b|"
+    r"\bhosted(?:\s+[a-z0-9-]+)?\s+service\b|"
     r"\b(?:api\.|hooks\.|webhook\.)[a-z0-9.-]+\b|"
     r"\b[a-z0-9-]+\.(?:com|dev|io|net|org)(?:\b|/)",
     re.I,
@@ -227,6 +228,10 @@ EXTERNAL_TARGET = re.compile(
 KNOWN_DESTINATIONS = frozenset({"discord", "github", "gitlab", "google", "slack"})
 MAX_RESOLVED_LOCAL_EDGES = 20_000
 MAX_UNRESOLVED_LOCAL_EDGES = 1_000
+MAX_LOCAL_MODULES = 2_000
+MAX_REACHABLE_FUNCTIONS_PER_TOOL = 256
+MAX_CROSS_MODULE_HOPS = 32
+MAX_CAPABILITY_PATHS_PER_TOOL = 1_000
 
 
 @dataclass(frozen=True)
@@ -337,7 +342,7 @@ def _local_calls(record: FunctionRecord, project: ParsedProject) -> Iterable[Fun
 
 
 def reachable_functions(project: ParsedProject, tool: ToolDefinition) -> list[FunctionRecord]:
-    """Return same-file functions reachable from a tool, without executing code."""
+    """Return bounded local functions reachable from a tool, without executing code."""
 
     root = project.functions.get((tool.source_file, tool.function_name))
     if root is None:
@@ -345,7 +350,7 @@ def reachable_functions(project: ParsedProject, tool: ToolDefinition) -> list[Fu
     queue: deque[FunctionRecord] = deque([root])
     visited: set[int] = set()
     records: list[FunctionRecord] = []
-    while queue:
+    while queue and len(records) < MAX_REACHABLE_FUNCTIONS_PER_TOOL:
         record = queue.popleft()
         key = id(record.node)
         if key in visited:
@@ -356,12 +361,190 @@ def reachable_functions(project: ParsedProject, tool: ToolDefinition) -> list[Fu
     return records
 
 
+def _reachable_function_paths(
+    project: ParsedProject,
+    tool: ToolDefinition,
+) -> dict[int, tuple[TraceStep, ...]]:
+    root = project.functions.get((tool.source_file, tool.function_name))
+    if root is None:
+        return {}
+    root_path = (TraceStep(tool.source_file, tool.line_number, tool.function_name),)
+    queue: deque[tuple[FunctionRecord, tuple[TraceStep, ...]]] = deque([(root, root_path)])
+    paths: dict[int, tuple[TraceStep, ...]] = {}
+    while queue and len(paths) < MAX_REACHABLE_FUNCTIONS_PER_TOOL:
+        record, path = queue.popleft()
+        identity = id(record.node)
+        if identity in paths:
+            continue
+        paths[identity] = path
+        execution = _execution(record, project)
+        for _, callee in sorted(
+            (
+                (node, execution.call_edges_by_call[id(node)])
+                for node in execution.nodes
+                if isinstance(node, ast.Call) and id(node) in execution.call_edges_by_call
+            ),
+            key=lambda item: (_line_number(item[0]), item[1].source_file, item[1].node.name),
+        ):
+            queue.append(
+                (
+                    callee,
+                    path
+                    + (
+                        TraceStep(
+                            callee.source_file,
+                            _line_number(callee.node),
+                            callee.node.name,
+                        ),
+                    ),
+                )
+            )
+    return paths
+
+
 def _call_expression(node: ast.AST) -> str:
     try:
         value = ast.unparse(node)
     except Exception:
         value = type(node).__name__
     return value if len(value) <= 240 else f"{value[:239]}…"
+
+
+@dataclass(frozen=True)
+class _LocalCallResolution:
+    target: FunctionRecord | None = None
+    reason: UnresolvedReason | None = None
+    candidate: str = ""
+
+
+def _absolute_import_name(
+    project: ParsedProject,
+    source_file: str,
+    name: str,
+) -> str:
+    if not name.startswith("."):
+        return name
+    level = len(name) - len(name.lstrip("."))
+    suffix = name[level:]
+    modules = project.file_modules.get(source_file, ())
+    if not modules:
+        return suffix
+    current = modules[0]
+    package = current.split(".")
+    if not source_file.endswith("/__init__.py") and source_file != "__init__.py":
+        package = package[:-1]
+    remove = max(level - 1, 0)
+    if remove > len(package):
+        return suffix
+    if remove:
+        package = package[:-remove]
+    if suffix:
+        package.extend(part for part in suffix.split(".") if part)
+    return ".".join(package)
+
+
+def _resolve_qualified_local(
+    project: ParsedProject,
+    source_file: str,
+    qualified: str,
+    *,
+    allow_reexport: bool = True,
+    direct_symbol: bool = False,
+) -> _LocalCallResolution:
+    candidate = _absolute_import_name(project, source_file, qualified)
+    parts = [part for part in candidate.split(".") if part]
+    for boundary in range(len(parts) - 1, 0, -1):
+        module = ".".join(parts[:boundary])
+        files = project.module_files.get(module)
+        if not files:
+            continue
+        remainder = parts[boundary:]
+        if len(files) != 1:
+            return _LocalCallResolution(
+                reason=UnresolvedReason.AMBIGUOUS_LOCAL_TARGET,
+                candidate=candidate,
+            )
+        target_file = files[0]
+        if len(remainder) != 1:
+            return _LocalCallResolution(
+                reason=(
+                    UnresolvedReason.MISSING_LOCAL_TARGET
+                    if direct_symbol
+                    else UnresolvedReason.UNSUPPORTED_INSTANCE_DISPATCH
+                ),
+                candidate=candidate,
+            )
+        symbol = remainder[0]
+        target = project.functions.get((target_file, symbol))
+        if target is not None:
+            return _LocalCallResolution(target=target, candidate=candidate)
+        if (target_file, symbol) in project.classes:
+            return _LocalCallResolution(
+                reason=UnresolvedReason.UNSUPPORTED_INSTANCE_DISPATCH,
+                candidate=candidate,
+            )
+        if allow_reexport and target_file.endswith("__init__.py"):
+            imported = project.module_imports.get(target_file, {}).get(symbol)
+            if imported:
+                resolved = _resolve_qualified_local(
+                    project,
+                    target_file,
+                    imported,
+                    allow_reexport=False,
+                    direct_symbol=True,
+                )
+                if resolved.target is not None:
+                    return resolved
+                return _LocalCallResolution(
+                    reason=UnresolvedReason.UNRESOLVED_REEXPORT,
+                    candidate=candidate,
+                )
+        return _LocalCallResolution(
+            reason=UnresolvedReason.MISSING_LOCAL_TARGET,
+            candidate=candidate,
+        )
+
+    local_roots = {name.split(".", 1)[0] for name in project.module_files}
+    if qualified.startswith(".") or (parts and parts[0] in local_roots):
+        return _LocalCallResolution(
+            reason=UnresolvedReason.MISSING_LOCAL_TARGET,
+            candidate=candidate,
+        )
+    return _LocalCallResolution()
+
+
+def _resolve_local_call(
+    project: ParsedProject,
+    record: FunctionRecord,
+    call: ast.Call,
+    imports: dict[str, str],
+) -> _LocalCallResolution:
+    if isinstance(call.func, ast.Name):
+        name = call.func.id
+        if name not in imports:
+            target = project.functions.get((record.source_file, name))
+            if target is not None:
+                return _LocalCallResolution(target=target)
+            return _LocalCallResolution()
+        imported = imports.get(name, "")
+        if not imported:
+            return _LocalCallResolution()
+        return _resolve_qualified_local(
+            project,
+            record.source_file,
+            imported,
+            direct_symbol=True,
+        )
+
+    if not isinstance(call.func, ast.Attribute):
+        return _LocalCallResolution()
+    base = call.func.value
+    while isinstance(base, ast.Attribute):
+        base = base.value
+    if not isinstance(base, ast.Name) or not imports.get(base.id):
+        return _LocalCallResolution()
+    qualified = _qualified_name(call.func, imports)
+    return _resolve_qualified_local(project, record.source_file, qualified)
 
 
 def analyze_reachability(
@@ -373,8 +556,9 @@ def analyze_reachability(
     root = project.functions.get((tool.source_file, tool.function_name))
     if root is None:
         return [], [], False
-    queue: deque[FunctionRecord] = deque([root])
+    queue: deque[tuple[FunctionRecord, int]] = deque([(root, 0)])
     visited: set[int] = set()
+    participating_modules: set[str] = set()
     resolved: dict[tuple[object, ...], ResolvedCallEdge] = {}
     unresolved: dict[tuple[object, ...], UnresolvedCallEdge] = {}
     budget_exceeded = False
@@ -452,11 +636,18 @@ def analyze_reachability(
         ] = edge
 
     while queue and not budget_exceeded:
-        record = queue.popleft()
+        record, cross_module_hops = queue.popleft()
         identity = id(record.node)
         if identity in visited:
             continue
         visited.add(identity)
+        participating_modules.add(record.source_file)
+        if (
+            len(visited) > MAX_REACHABLE_FUNCTIONS_PER_TOOL
+            or len(participating_modules) > MAX_LOCAL_MODULES
+        ):
+            budget_exceeded = True
+            break
         execution = _execution(record, project)
         parameters = _parameter_names(record.node)
         for node in execution.nodes:
@@ -494,12 +685,37 @@ def analyze_reachability(
                         edge.target_symbol,
                     )
                 ] = edge
-                queue.append(callee)
+                next_hops = cross_module_hops + int(callee.source_file != record.source_file)
+                if callee.source_file != record.source_file and (
+                    any(isinstance(argument, ast.Starred) for argument in node.args)
+                    or any(keyword.arg is None for keyword in node.keywords)
+                ):
+                    add_unresolved(
+                        record,
+                        node,
+                        UnresolvedReason.UNRESOLVED_ARGUMENT_LINEAGE,
+                        f"{callee.source_file}:{callee.node.name}",
+                    )
+                if next_hops > MAX_CROSS_MODULE_HOPS:
+                    add_unresolved(
+                        record,
+                        node,
+                        UnresolvedReason.GRAPH_RESOURCE_BUDGET,
+                        f"maximum cross-module depth {MAX_CROSS_MODULE_HOPS}",
+                    )
+                    budget_exceeded = True
+                    break
+                queue.append((callee, next_hops))
                 if len(resolved) > MAX_RESOLVED_LOCAL_EDGES:
                     budget_exceeded = True
                 continue
 
             imports = execution.imports_for(node)
+            local_unresolved = execution.unresolved_local_calls.get(id(node))
+            if local_unresolved is not None:
+                reason, candidate = local_unresolved
+                add_unresolved(record, node, reason, candidate)
+                continue
             name = _qualified_name(node.func, imports)
             if name in {"importlib.import_module", "__import__", "builtins.__import__"}:
                 add_unresolved(record, node, UnresolvedReason.DYNAMIC_IMPORT, name)
@@ -515,7 +731,17 @@ def analyze_reachability(
             elif (
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
-                and node.func.value.id in {"self", "cls"}
+                and (
+                    node.func.value.id in {"self", "cls"}
+                    or (
+                        node.func.value.id in parameters
+                        and _parameter_has_local_class_annotation(
+                            project,
+                            record,
+                            node.func.value.id,
+                        )
+                    )
+                )
             ):
                 add_unresolved(
                     record,
@@ -660,6 +886,9 @@ class _ExecutionResult:
     imports_by_node: dict[int, dict[str, str]] = field(default_factory=dict)
     call_edges: list[FunctionRecord] = field(default_factory=list)
     call_edges_by_call: dict[int, FunctionRecord] = field(default_factory=dict)
+    unresolved_local_calls: dict[int, tuple[UnresolvedReason, str]] = field(
+        default_factory=dict
+    )
     nested_call_ids: set[int] = field(default_factory=set)
     instance_network_calls: dict[int, str] = field(default_factory=dict)
     path_filesystem_calls: dict[int, tuple[str, Capability]] = field(default_factory=dict)
@@ -691,6 +920,32 @@ def _parameter_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     if arguments.kwarg is not None:
         names.add(arguments.kwarg.arg)
     return names
+
+
+def _parameter_has_local_class_annotation(
+    project: ParsedProject,
+    record: FunctionRecord,
+    parameter_name: str,
+) -> bool:
+    arguments = [
+        *record.node.args.posonlyargs,
+        *record.node.args.args,
+        *record.node.args.kwonlyargs,
+    ]
+    argument = next((item for item in arguments if item.arg == parameter_name), None)
+    if argument is None or argument.annotation is None:
+        return False
+    qualified = _qualified_name(argument.annotation, record.imports)
+    candidate = _absolute_import_name(project, record.source_file, qualified)
+    if (record.source_file, candidate) in project.classes:
+        return True
+    for source_file, symbol in project.classes:
+        if symbol != candidate.rsplit(".", 1)[-1]:
+            continue
+        for module in project.file_modules.get(source_file, ()):
+            if candidate == f"{module}.{symbol}":
+                return True
+    return False
 
 
 class _ExecutionVisitor(ast.NodeVisitor):
@@ -832,16 +1087,12 @@ class _ExecutionVisitor(ast.NodeVisitor):
             self.record.wildcard_imports,
         )
 
-    def _direct_call_edge(self, call: ast.Call) -> FunctionRecord | None:
-        if not isinstance(call.func, ast.Name):
-            return None
-        name = call.func.id
-        nested = self.nested.get(name)
-        if nested is not None:
-            return self._nested_record(nested)
-        if name in self.imports:
-            return None
-        return self.project.functions.get((self.record.source_file, name))
+    def _direct_call_resolution(self, call: ast.Call) -> _LocalCallResolution:
+        if isinstance(call.func, ast.Name):
+            nested = self.nested.get(call.func.id)
+            if nested is not None:
+                return _LocalCallResolution(target=self._nested_record(nested))
+        return _resolve_local_call(self.project, self.record, call, self.result.imports_for(call))
 
     def _state(self) -> _BindingState:
         return _BindingState(
@@ -888,7 +1139,8 @@ class _ExecutionVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         self._remember(node, event=True)
         imports = self.result.imports_for(node)
-        edge = self._direct_call_edge(node)
+        resolution = self._direct_call_resolution(node)
+        edge = resolution.target
         is_nested_edge = (
             isinstance(node.func, ast.Name) and node.func.id in self.nested
         )
@@ -904,6 +1156,11 @@ class _ExecutionVisitor(ast.NodeVisitor):
             self.result.call_edges_by_call[id(node)] = edge
             if is_nested_edge:
                 self.result.nested_call_ids.add(id(node))
+        elif resolution.reason is not None:
+            self.result.unresolved_local_calls[id(node)] = (
+                resolution.reason,
+                resolution.candidate,
+            )
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
         self._remember(node)
@@ -957,12 +1214,10 @@ class _ExecutionVisitor(ast.NodeVisitor):
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         self._remember(node)
-        if node.module is None:
-            return
         for item in node.names:
             name = item.asname or item.name
             self._shadow_name(name)
-            self.imports[name] = f"{node.module}.{item.name}"
+            self.imports[name] = _relative_import_name(node, item)
 
     def _definition_expressions(
         self,
@@ -1137,11 +1392,13 @@ def _static_network_hosts(project: ParsedProject, tool: ToolDefinition) -> tuple
 def analyze_capabilities(
     project: ParsedProject,
     tool: ToolDefinition,
-) -> list[ObservedCapability]:
+) -> tuple[list[ObservedCapability], bool]:
     """Find side effects in code reachable from one MCP tool."""
 
     observed: list[ObservedCapability] = []
     seen: set[tuple[Capability, str, int, str]] = set()
+    paths = _reachable_function_paths(project, tool)
+    budget_exceeded = False
     for record in reachable_functions(project, tool):
         execution = _execution(record, project)
         for node in execution.nodes:
@@ -1185,9 +1442,19 @@ def analyze_capabilities(
                         line_number,
                         symbol,
                         detail,
+                        paths.get(
+                            id(record.node),
+                            (TraceStep(tool.source_file, tool.line_number, tool.function_name),),
+                        )
+                        + (TraceStep(record.source_file, line_number, symbol),),
                     ),
                 )
             )
+            if len(observed) > MAX_CAPABILITY_PATHS_PER_TOOL:
+                budget_exceeded = True
+                break
+        if budget_exceeded:
+            break
     observed.sort(
         key=lambda item: (
             item.capability.value,
@@ -1195,7 +1462,7 @@ def analyze_capabilities(
             item.evidence.symbol,
         )
     )
-    return observed
+    return observed[:MAX_CAPABILITY_PATHS_PER_TOOL], budget_exceeded
 
 
 @dataclass(frozen=True)
@@ -1992,6 +2259,7 @@ def analyze_contract(
                     item.evidence.line_number,
                     item.evidence.symbol,
                     f"{item.evidence.detail}; {disclosure_detail}",
+                    item.evidence.path,
                 ),
             )
         if not assessment.disclosed:
@@ -2023,6 +2291,7 @@ def analyze_contract(
                         network_evidence.line_number,
                         network_evidence.symbol,
                         f"{network_evidence.detail}; {disclosure_detail}",
+                        network_evidence.path,
                     ),
                 )
             )
@@ -2048,6 +2317,26 @@ def analyze_contract(
                 sink.evidence.symbol,
             ),
         ).evidence
+        matching_capability = next(
+            (
+                item.evidence
+                for item in observed
+                if item.capability
+                in {Capability.FILESYSTEM_READ, Capability.FILESYSTEM_WRITE}
+                and item.evidence.source_file == evidence.source_file
+                and item.evidence.line_number == evidence.line_number
+                and item.evidence.symbol == evidence.symbol
+            ),
+            None,
+        )
+        if matching_capability is not None:
+            evidence = Evidence(
+                evidence.source_file,
+                evidence.line_number,
+                evidence.symbol,
+                evidence.detail,
+                matching_capability.path,
+            )
         findings.append(
             _finding(
                 "MSC103",

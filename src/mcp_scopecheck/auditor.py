@@ -6,7 +6,14 @@ import hashlib
 import json
 from pathlib import Path
 
-from .analyzer import analyze_capabilities, analyze_contract, analyze_reachability
+from .analyzer import (
+    MAX_RESOLVED_LOCAL_EDGES,
+    MAX_UNRESOLVED_LOCAL_EDGES,
+    _is_path_parameter_name,
+    analyze_capabilities,
+    analyze_contract,
+    analyze_reachability,
+)
 from .models import (
     AnalysisCompleteness,
     AnalysisNotification,
@@ -42,6 +49,14 @@ def _snapshot_payload(report: AuditReport) -> bytes:
                         "source": item.evidence.source_file,
                         "line": item.evidence.line_number,
                         "symbol": item.evidence.symbol,
+                        "path": [
+                            {
+                                "source": step.source_file,
+                                "line": step.line_number,
+                                "symbol": step.symbol,
+                            }
+                            for step in item.evidence.path
+                        ],
                     }
                     for item in report.capabilities.get(tool.key, [])
                 ],
@@ -91,6 +106,7 @@ def audit(target: str | Path) -> AuditReport:
     resolved_edges = []
     unresolved_edges = []
     graph_budget_exceeded = False
+    capability_budget_exceeded = False
     for tool in project.tools:
         tool_resolved, tool_unresolved, tool_budget_exceeded = analyze_reachability(
             project,
@@ -99,7 +115,10 @@ def audit(target: str | Path) -> AuditReport:
         resolved_edges.extend(tool_resolved)
         unresolved_edges.extend(tool_unresolved)
         graph_budget_exceeded = graph_budget_exceeded or tool_budget_exceeded
-        tool_capabilities = analyze_capabilities(project, tool)
+        tool_capabilities, tool_capability_budget = analyze_capabilities(project, tool)
+        capability_budget_exceeded = (
+            capability_budget_exceeded or tool_capability_budget
+        )
         capabilities[tool.key] = tool_capabilities
         findings.extend(analyze_contract(project, tool, tool_capabilities))
 
@@ -152,21 +171,58 @@ def audit(target: str | Path) -> AuditReport:
             edge.call_expression,
         )
     )
+    if (
+        len(resolved_edges) > MAX_RESOLVED_LOCAL_EDGES
+        or len(unresolved_edges) > MAX_UNRESOLVED_LOCAL_EDGES
+    ):
+        graph_budget_exceeded = True
+    resolved_edges = resolved_edges[:MAX_RESOLVED_LOCAL_EDGES]
+    unresolved_edges = unresolved_edges[:MAX_UNRESOLVED_LOCAL_EDGES]
     notifications = []
+    tools_by_name = {tool.name: tool for tool in project.tools}
+    for edge in unresolved_edges:
+        tool = tools_by_name.get(edge.tool_name)
+        if tool is None or not any(
+            _is_path_parameter_name(parameter.name) for parameter in tool.parameters
+        ):
+            continue
+        notifications.append(
+            AnalysisNotification(
+                "MSC103-GUARD-UNKNOWN",
+                "MSC103 was not inferred across unresolved path lineage for tool "
+                f"{tool.name!r}",
+                edge.source_file,
+                edge.line_number,
+            )
+        )
     failed_diagnostic = any(
         diagnostic.status is AnalysisStatus.FAILED for diagnostic in project.diagnostics
     )
     partial_diagnostic = any(
         diagnostic.status is AnalysisStatus.PARTIAL for diagnostic in project.diagnostics
     )
-    if graph_budget_exceeded:
+    if graph_budget_exceeded or capability_budget_exceeded:
         notifications.append(
             AnalysisNotification(
                 "MSC-ANALYSIS-BUDGET",
                 "analysis failed because the local call-edge budget was exhausted",
             )
         )
-    if failed_diagnostic or graph_budget_exceeded:
+    notifications = list(
+        {
+            (
+                item.code,
+                item.message,
+                item.source_file,
+                item.line_number,
+            ): item
+            for item in notifications
+        }.values()
+    )
+    notifications.sort(
+        key=lambda item: (item.code, item.source_file, item.line_number, item.message)
+    )
+    if failed_diagnostic or graph_budget_exceeded or capability_budget_exceeded:
         status = AnalysisStatus.FAILED
     elif (
         partial_diagnostic

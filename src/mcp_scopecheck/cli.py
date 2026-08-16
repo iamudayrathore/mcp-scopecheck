@@ -55,15 +55,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     print(render_report(report))
-    if not report.tools and not report.completeness.potential_registrations:
-        print("mcp-scopecheck: no supported MCP tool decorators were found", file=sys.stderr)
-        return 2
     if report.completeness.status is not AnalysisStatus.COMPLETE:
         if report.diagnostics:
             message = (
                 "mcp-scopecheck: audit incomplete because diagnostics were reported "
                 f"(status: {report.completeness.status.value})"
             )
+        elif not report.tools and not report.completeness.potential_registrations:
+            message = "mcp-scopecheck: no supported MCP tool decorators were found"
         else:
             message = (
                 f"mcp-scopecheck: audit {report.completeness.status.value}; "

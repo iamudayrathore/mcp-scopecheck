@@ -52,6 +52,7 @@ class UnresolvedReason(StrEnum):
     GRAPH_RESOURCE_BUDGET = "graph/resource budget"
     HIGHER_ORDER_CALL = "higher-order call"
     MISSING_LOCAL_TARGET = "missing local target"
+    UNRESOLVED_ARGUMENT_LINEAGE = "unresolved argument/guard lineage"
     UNRESOLVED_REEXPORT = "unresolved re-export"
     UNSUPPORTED_INSTANCE_DISPATCH = "unsupported instance/class dispatch"
     WILDCARD_IMPORT = "wildcard import"
@@ -98,6 +99,15 @@ class ToolDefinition:
 
 
 @dataclass(frozen=True)
+class TraceStep:
+    """One stable source location in a capability reachability path."""
+
+    source_file: str
+    line_number: int
+    symbol: str
+
+
+@dataclass(frozen=True)
 class Evidence:
     """A source location supporting an observed capability or finding."""
 
@@ -105,6 +115,7 @@ class Evidence:
     line_number: int
     symbol: str
     detail: str
+    path: tuple[TraceStep, ...] = ()
 
     @property
     def location(self) -> str:

@@ -140,6 +140,10 @@ class ParsedProject:
     functions: dict[tuple[str, str], FunctionRecord] = field(default_factory=dict)
     diagnostics: list[Diagnostic] = field(default_factory=list)
     potential_registrations: list[PotentialRegistration] = field(default_factory=list)
+    module_files: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    file_modules: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    module_imports: dict[str, dict[str, str]] = field(default_factory=dict)
+    classes: set[tuple[str, str]] = field(default_factory=set)
 
 
 def _safe_unparse(node: ast.AST | None) -> str:
@@ -569,6 +573,14 @@ def _extract_parameters(function: ast.FunctionDef | ast.AsyncFunctionDef) -> tup
     return tuple(parameters)
 
 
+def _relative_import_name(node: ast.ImportFrom, item: ast.alias) -> str:
+    prefix = "." * node.level
+    module = node.module or ""
+    base = f"{prefix}{module}"
+    separator = "" if base.endswith(".") else "."
+    return f"{base}{separator}{item.name}" if base else item.name
+
+
 def _imports(tree: ast.Module) -> dict[str, str]:
     aliases: dict[str, str] = {}
     for node in tree.body:
@@ -576,9 +588,9 @@ def _imports(tree: ast.Module) -> dict[str, str]:
             for item in node.names:
                 bound_name = item.asname or item.name.split(".")[0]
                 aliases[bound_name] = item.name if item.asname else bound_name
-        elif isinstance(node, ast.ImportFrom) and node.module:
+        elif isinstance(node, ast.ImportFrom):
             for item in node.names:
-                aliases[item.asname or item.name] = f"{node.module}.{item.name}"
+                aliases[item.asname or item.name] = _relative_import_name(node, item)
         elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for target in targets:
@@ -743,6 +755,20 @@ def _finish_project(project: ParsedProject) -> ParsedProject:
     return project
 
 
+def _module_names(source_file: str) -> tuple[str, ...]:
+    path = Path(source_file)
+    parts = list(path.with_suffix("").parts)
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    names: set[str] = set()
+    if parts:
+        names.add(".".join(parts))
+    for index, part in enumerate(parts):
+        if part == "src" and index + 1 < len(parts):
+            names.add(".".join(parts[index + 1 :]))
+    return tuple(sorted(names, key=lambda item: (item.count("."), len(item), item)))
+
+
 def parse_project(target: str | Path) -> ParsedProject:
     """Parse MCP tool declarations without importing or executing target code."""
 
@@ -768,6 +794,18 @@ def parse_project(target: str | Path) -> ParsedProject:
             Diagnostic("<target>", f"unable to enumerate target: {exc}"),
         )
         return _finish_project(project)
+
+    module_sources: dict[str, list[str]] = {}
+    for candidate in candidates:
+        relative = candidate.relative_to(project_root).as_posix()
+        names = _module_names(relative)
+        project.file_modules[relative] = names
+        for name in names:
+            module_sources.setdefault(name, []).append(relative)
+    project.module_files = {
+        name: tuple(sorted(set(files)))
+        for name, files in sorted(module_sources.items())
+    }
 
     total_source_bytes = 0
     total_ast_nodes = 0
@@ -855,6 +893,7 @@ def parse_project(target: str | Path) -> ParsedProject:
         total_ast_nodes += node_count
 
         aliases = _imports(tree)
+        project.module_imports[relative] = aliases
         path_bindings = _module_path_bindings(tree, aliases)
         wildcard_imports = tuple(
             (_node_line_number(node), node.module or "." * node.level)
@@ -863,6 +902,8 @@ def parse_project(target: str | Path) -> ParsedProject:
             and any(item.name == "*" for item in node.names)
         )
         for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                project.classes.add((relative, node.name))
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             project.functions[(relative, node.name)] = FunctionRecord(
