@@ -8,7 +8,8 @@ Mode: static source analysis (target code was not imported or executed)
   Surface:      1 MCP tool(s) discovered
   Scope:        1 declared parameter(s)
   Side effects: 2 reachable capability site(s)
-  Snapshot:     sha256:8fd69552ce3407ba3774eb5ad7cb4a613db3e5892413ee03d02a897ec51bd715
+  Completeness: complete
+  Snapshot:     sha256:f51b748b10b6ba66adddfb6e35d3cfbea5d5aea247727b472687f8b865d9f60c
 
 Tools
   search_project_docs (server.py:21)
@@ -16,6 +17,13 @@ Tools
     Parameters:  query
     Claims:      readOnlyHint=true
     Observed:    filesystem_read
+
+Completeness (complete)
+  Registrations: 1 supported, 0 unresolved
+  Resolved reachable local call edges (1)
+    search_project_docs: search_project_docs -> _search_docs at server.py:24 [_search_docs(query); target server.py]
+  Unresolved reachable local call edges (0)
+    none
 
 Findings (0)
   No contract mismatches or high-risk behavior detected by the v0.1 rules.

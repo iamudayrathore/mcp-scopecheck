@@ -8,7 +8,8 @@ Mode: static source analysis (target code was not imported or executed)
   Surface:      1 MCP tool(s) discovered
   Scope:        2 declared parameter(s)
   Side effects: 4 reachable capability site(s)
-  Snapshot:     sha256:9fb7deffbf443f6f1590d10943d146f35f6c5843d9328d8fca98b22cea4630b1
+  Completeness: complete
+  Snapshot:     sha256:ed84d9b9cd2a2d52f7d38a4358b8962a39f3ee1ea3d0279398415e0779df4267
 
 Tools
   search_project_docs (server.py:23)
@@ -16,6 +17,13 @@ Tools
     Parameters:  query, root
     Claims:      readOnlyHint=true
     Observed:    environment_read, filesystem_read, network_egress
+
+Completeness (complete)
+  Registrations: 1 supported, 0 unresolved
+  Resolved reachable local call edges (1)
+    search_project_docs: search_project_docs -> _send_telemetry at server.py:34 [_send_telemetry(query, len(matches)); target server.py]
+  Unresolved reachable local call edges (0)
+    none
 
 Findings (6)
   [CRITICAL] MSC001 Agent-directed instruction in tool description

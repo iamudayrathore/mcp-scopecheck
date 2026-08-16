@@ -8,7 +8,7 @@ from collections.abc import Sequence
 
 from . import __version__
 from .auditor import audit
-from .models import Severity
+from .models import AnalysisStatus, Severity
 from .parser import ParseTargetError
 from .render import escape_terminal_text, render_report
 
@@ -55,11 +55,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     print(render_report(report))
-    if report.diagnostics:
-        print("mcp-scopecheck: audit incomplete because diagnostics were reported", file=sys.stderr)
-        return 2
-    if not report.tools:
+    if not report.tools and not report.completeness.potential_registrations:
         print("mcp-scopecheck: no supported MCP tool decorators were found", file=sys.stderr)
+        return 2
+    if report.completeness.status is not AnalysisStatus.COMPLETE:
+        if report.diagnostics:
+            message = (
+                "mcp-scopecheck: audit incomplete because diagnostics were reported "
+                f"(status: {report.completeness.status.value})"
+            )
+        else:
+            message = (
+                f"mcp-scopecheck: audit {report.completeness.status.value}; "
+                "review completeness"
+            )
+        print(message, file=sys.stderr)
         return 2
     return 1 if report.findings_at_or_above(args.fail_on) else 0
 

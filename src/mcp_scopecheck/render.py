@@ -70,6 +70,7 @@ def render_report(report: AuditReport) -> str:
         f"  Surface:      {len(report.tools)} MCP tool(s) discovered",
         f"  Scope:        {parameter_count} declared parameter(s)",
         f"  Side effects: {capability_count} reachable capability site(s)",
+        f"  Completeness: {report.completeness.status.value}",
         f"  Snapshot:     sha256:{report.snapshot}",
         "",
     ]
@@ -100,6 +101,65 @@ def render_report(report: AuditReport) -> str:
                 ]
             )
         lines.append("")
+
+    completeness = report.completeness
+    lines.extend(
+        [
+            f"Completeness ({completeness.status.value})",
+            f"  Registrations: {completeness.supported_registrations} supported, "
+            f"{completeness.unresolved_registrations} unresolved",
+            f"  Resolved reachable local call edges ({len(completeness.resolved_edges)})",
+        ]
+    )
+    if not completeness.resolved_edges:
+        lines.append("    none")
+    else:
+        for edge in completeness.resolved_edges:
+            lines.append(
+                f"    {display(edge.tool_name)}: {display(edge.caller)} -> "
+                f"{display(edge.target_symbol)} at "
+                f"{display(edge.source_file)}:{edge.line_number} "
+                f"[{display(edge.call_expression)}; target "
+                f"{display(edge.target_file)}]"
+            )
+
+    lines.append(
+        f"  Unresolved reachable local call edges ({len(completeness.unresolved_edges)})"
+    )
+    if not completeness.unresolved_edges:
+        lines.append("    none")
+    else:
+        for edge in completeness.unresolved_edges:
+            candidate = f"; candidate {display(edge.candidate)}" if edge.candidate else ""
+            lines.extend(
+                [
+                    f"    {display(edge.tool_name)}: {display(edge.caller)} at "
+                    f"{display(edge.source_file)}:{edge.line_number}",
+                    f"      Call: {display(edge.call_expression)}",
+                    f"      Reason: {display(edge.reason.value)}{candidate}",
+                ]
+            )
+
+    if completeness.potential_registrations:
+        lines.append(
+            "  Potential unsupported MCP registrations "
+            f"({completeness.unresolved_registrations})"
+        )
+        for registration in completeness.potential_registrations:
+            lines.append(
+                f"    {display(registration.source_file)}:{registration.line_number} "
+                f"{display(registration.expression)} "
+                f"[{display(registration.reason)}]"
+            )
+    for notification in completeness.notifications:
+        location = display(notification.source_file)
+        if notification.line_number:
+            location = f"{location}:{notification.line_number}"
+        lines.append(
+            f"  Notification {display(notification.code)} at {location}: "
+            f"{display(notification.message)}"
+        )
+    lines.append("")
 
     lines.append(f"Findings ({len(report.findings)})")
     if not report.findings:

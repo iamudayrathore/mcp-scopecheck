@@ -14,8 +14,11 @@ from .models import (
     Evidence,
     Finding,
     ObservedCapability,
+    ResolvedCallEdge,
     Severity,
     ToolDefinition,
+    UnresolvedCallEdge,
+    UnresolvedReason,
 )
 from .parser import FunctionRecord, ParsedProject
 
@@ -222,6 +225,8 @@ EXTERNAL_TARGET = re.compile(
     re.I,
 )
 KNOWN_DESTINATIONS = frozenset({"discord", "github", "gitlab", "google", "slack"})
+MAX_RESOLVED_LOCAL_EDGES = 20_000
+MAX_UNRESOLVED_LOCAL_EDGES = 1_000
 
 
 @dataclass(frozen=True)
@@ -349,6 +354,199 @@ def reachable_functions(project: ParsedProject, tool: ToolDefinition) -> list[Fu
         records.append(record)
         queue.extend(_local_calls(record, project))
     return records
+
+
+def _call_expression(node: ast.AST) -> str:
+    try:
+        value = ast.unparse(node)
+    except Exception:
+        value = type(node).__name__
+    return value if len(value) <= 240 else f"{value[:239]}…"
+
+
+def analyze_reachability(
+    project: ParsedProject,
+    tool: ToolDefinition,
+) -> tuple[list[ResolvedCallEdge], list[UnresolvedCallEdge], bool]:
+    """Build a bounded honesty ledger for one registered tool."""
+
+    root = project.functions.get((tool.source_file, tool.function_name))
+    if root is None:
+        return [], [], False
+    queue: deque[FunctionRecord] = deque([root])
+    visited: set[int] = set()
+    resolved: dict[tuple[object, ...], ResolvedCallEdge] = {}
+    unresolved: dict[tuple[object, ...], UnresolvedCallEdge] = {}
+    budget_exceeded = False
+
+    def add_unresolved(
+        record: FunctionRecord,
+        node: ast.AST,
+        reason: UnresolvedReason,
+        candidate: str = "",
+    ) -> None:
+        nonlocal budget_exceeded
+        edge = UnresolvedCallEdge(
+            tool.name,
+            record.source_file,
+            _line_number(node),
+            record.node.name,
+            _call_expression(node),
+            reason,
+            candidate,
+        )
+        key = (
+            edge.tool_name,
+            edge.source_file,
+            edge.line_number,
+            edge.caller,
+            edge.call_expression,
+            edge.reason,
+            edge.candidate,
+        )
+        unresolved[key] = edge
+        if len(unresolved) > MAX_UNRESOLVED_LOCAL_EDGES:
+            budget_exceeded = True
+
+    for line_number, expression in tool.wrapper_expressions:
+        edge = UnresolvedCallEdge(
+            tool.name,
+            tool.source_file,
+            line_number,
+            tool.function_name,
+            expression,
+            UnresolvedReason.WRAPPER_INDIRECTION,
+        )
+        unresolved[
+            (
+                edge.tool_name,
+                edge.source_file,
+                edge.line_number,
+                edge.caller,
+                edge.call_expression,
+                edge.reason,
+                edge.candidate,
+            )
+        ] = edge
+
+    for line_number, module in root.wildcard_imports:
+        edge = UnresolvedCallEdge(
+            tool.name,
+            root.source_file,
+            line_number,
+            root.node.name,
+            f"from {module} import *",
+            UnresolvedReason.WILDCARD_IMPORT,
+            module,
+        )
+        unresolved[
+            (
+                edge.tool_name,
+                edge.source_file,
+                edge.line_number,
+                edge.caller,
+                edge.call_expression,
+                edge.reason,
+                edge.candidate,
+            )
+        ] = edge
+
+    while queue and not budget_exceeded:
+        record = queue.popleft()
+        identity = id(record.node)
+        if identity in visited:
+            continue
+        visited.add(identity)
+        execution = _execution(record, project)
+        parameters = _parameter_names(record.node)
+        for node in execution.nodes:
+            if isinstance(node, ast.ImportFrom) and any(
+                item.name == "*" for item in node.names
+            ):
+                add_unresolved(
+                    record,
+                    node,
+                    UnresolvedReason.WILDCARD_IMPORT,
+                    node.module or "",
+                )
+                continue
+            if not isinstance(node, ast.Call):
+                continue
+            callee = execution.call_edges_by_call.get(id(node))
+            if callee is not None:
+                edge = ResolvedCallEdge(
+                    tool.name,
+                    record.source_file,
+                    _line_number(node),
+                    record.node.name,
+                    _call_expression(node),
+                    callee.source_file,
+                    callee.node.name,
+                )
+                resolved[
+                    (
+                        edge.tool_name,
+                        edge.source_file,
+                        edge.line_number,
+                        edge.caller,
+                        edge.call_expression,
+                        edge.target_file,
+                        edge.target_symbol,
+                    )
+                ] = edge
+                queue.append(callee)
+                if len(resolved) > MAX_RESOLVED_LOCAL_EDGES:
+                    budget_exceeded = True
+                continue
+
+            imports = execution.imports_for(node)
+            name = _qualified_name(node.func, imports)
+            if name in {"importlib.import_module", "__import__", "builtins.__import__"}:
+                add_unresolved(record, node, UnresolvedReason.DYNAMIC_IMPORT, name)
+            elif isinstance(node.func, ast.Name) and (
+                node.func.id in parameters or imports.get(node.func.id) == ""
+            ):
+                add_unresolved(
+                    record,
+                    node,
+                    UnresolvedReason.HIGHER_ORDER_CALL,
+                    node.func.id,
+                )
+            elif (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in {"self", "cls"}
+            ):
+                add_unresolved(
+                    record,
+                    node,
+                    UnresolvedReason.UNSUPPORTED_INSTANCE_DISPATCH,
+                    _call_expression(node.func),
+                )
+
+    resolved_values = sorted(
+        resolved.values(),
+        key=lambda item: (
+            item.tool_name,
+            item.source_file,
+            item.line_number,
+            item.caller,
+            item.target_file,
+            item.target_symbol,
+        ),
+    )[:MAX_RESOLVED_LOCAL_EDGES]
+    unresolved_values = sorted(
+        unresolved.values(),
+        key=lambda item: (
+            item.tool_name,
+            item.source_file,
+            item.line_number,
+            item.caller,
+            item.reason.value,
+            item.call_expression,
+        ),
+    )[:MAX_UNRESOLVED_LOCAL_EDGES]
+    return resolved_values, unresolved_values, budget_exceeded
 
 
 def _mode_capability(call: ast.Call, positional_index: int) -> Capability:
@@ -631,6 +829,7 @@ class _ExecutionVisitor(ast.NodeVisitor):
             dict(self.imports),
             frozenset(self.paths),
             dict(self.clients),
+            self.record.wildcard_imports,
         )
 
     def _direct_call_edge(self, call: ast.Call) -> FunctionRecord | None:
@@ -750,12 +949,14 @@ class _ExecutionVisitor(ast.NodeVisitor):
         self._update_targets(node.targets)
 
     def visit_Import(self, node: ast.Import) -> None:
+        self._remember(node)
         for item in node.names:
             name = item.asname or item.name.split(".")[0]
             self._shadow_name(name)
             self.imports[name] = item.name if item.asname else name
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        self._remember(node)
         if node.module is None:
             return
         for item in node.names:

@@ -13,7 +13,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeAlias
 
-from .models import Diagnostic, Parameter, ToolDefinition
+from .models import (
+    AnalysisStatus,
+    Diagnostic,
+    Parameter,
+    PotentialRegistration,
+    ToolDefinition,
+)
 
 SKIP_DIRECTORIES = {
     ".git",
@@ -121,6 +127,7 @@ class FunctionRecord:
     imports: dict[str, str]
     path_bindings: frozenset[str] = frozenset()
     client_bindings: dict[str, str] = field(default_factory=dict)
+    wildcard_imports: tuple[tuple[int, str], ...] = ()
 
 
 @dataclass
@@ -132,6 +139,7 @@ class ParsedProject:
     tools: list[ToolDefinition] = field(default_factory=list)
     functions: dict[tuple[str, str], FunctionRecord] = field(default_factory=dict)
     diagnostics: list[Diagnostic] = field(default_factory=list)
+    potential_registrations: list[PotentialRegistration] = field(default_factory=list)
 
 
 def _safe_unparse(node: ast.AST | None) -> str:
@@ -249,6 +257,134 @@ def _is_tool_decorator(node: ast.AST) -> bool:
     target = node.func if isinstance(node, ast.Call) else node
     name = _call_name(target)
     return name == "tool" or name.endswith(".tool")
+
+
+def _potential_registrations(
+    tree: ast.Module,
+    source_file: str,
+) -> list[PotentialRegistration]:
+    """Detect bounded MCP registration syntax that is intentionally unsupported."""
+
+    registrations: list[PotentialRegistration] = []
+    top_level_ids = {
+        id(node)
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    decorator_ids = {
+        id(decorator)
+        for function in ast.walk(tree)
+        if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for decorator in function.decorator_list
+    }
+
+    for function in ast.walk(tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        tool_decorators = [
+            decorator for decorator in function.decorator_list if _is_tool_decorator(decorator)
+        ]
+        if tool_decorators and id(function) not in top_level_ids:
+            decorator = tool_decorators[0]
+            registrations.append(
+                PotentialRegistration(
+                    source_file,
+                    _node_line_number(decorator),
+                    _safe_unparse(decorator),
+                    "nested or class-owned tool decorator",
+                )
+            )
+
+        low_level = any(
+            _call_name(decorator.func if isinstance(decorator, ast.Call) else decorator).endswith(
+                ".list_tools"
+            )
+            for decorator in function.decorator_list
+        )
+        if low_level:
+            static_tools = [
+                call
+                for call in ast.walk(function)
+                if isinstance(call, ast.Call)
+                and _call_name(call.func).rsplit(".", 1)[-1] == "Tool"
+            ]
+            if static_tools:
+                registrations.extend(
+                    PotentialRegistration(
+                        source_file,
+                        _node_line_number(call),
+                        _safe_unparse(call),
+                        "low-level static Tool list",
+                    )
+                    for call in static_tools
+                )
+            else:
+                decorator = next(
+                    item
+                    for item in function.decorator_list
+                    if _call_name(item.func if isinstance(item, ast.Call) else item).endswith(
+                        ".list_tools"
+                    )
+                )
+                registrations.append(
+                    PotentialRegistration(
+                        source_file,
+                        _node_line_number(decorator),
+                        _safe_unparse(decorator),
+                        "low-level list_tools registration",
+                        potential_tool_count=0,
+                    )
+                )
+
+    for statement in tree.body:
+        value: ast.AST | None = None
+        if isinstance(statement, ast.Assign):
+            value = statement.value
+        elif isinstance(statement, ast.AnnAssign):
+            value = statement.value
+        if not isinstance(value, (ast.List, ast.Tuple)):
+            continue
+        for call in value.elts:
+            if not isinstance(call, ast.Call):
+                continue
+            if _call_name(call.func).rsplit(".", 1)[-1] != "Tool":
+                continue
+            registrations.append(
+                PotentialRegistration(
+                    source_file,
+                    _node_line_number(call),
+                    _safe_unparse(call),
+                    "importable static Tool collection",
+                )
+            )
+
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call) or id(call) in decorator_ids:
+            continue
+        name = _call_name(call.func)
+        if name.endswith(".add_tool"):
+            reason = "add_tool registration"
+        elif name.endswith(".tool") and call.args:
+            reason = "runtime tool registration"
+        else:
+            continue
+        registrations.append(
+            PotentialRegistration(
+                source_file,
+                _node_line_number(call),
+                _safe_unparse(call.func),
+                reason,
+            )
+        )
+
+    unique = {
+        (item.source_file, item.line_number, item.expression, item.reason): item
+        for item in registrations
+    }
+    return sorted(
+        unique.values(),
+        key=lambda item: (item.source_file, item.line_number, item.expression, item.reason),
+    )
 
 
 def _tool_metadata(
@@ -596,6 +732,14 @@ def _ast_metrics(tree: ast.AST, remaining_nodes: int) -> tuple[int, int]:
 
 def _finish_project(project: ParsedProject) -> ParsedProject:
     project.tools.sort(key=lambda item: (item.source_file, item.line_number, item.name))
+    unique_registrations = {
+        (item.source_file, item.line_number, item.expression, item.reason): item
+        for item in project.potential_registrations
+    }
+    project.potential_registrations = sorted(
+        unique_registrations.values(),
+        key=lambda item: (item.source_file, item.line_number, item.expression, item.reason),
+    )
     return project
 
 
@@ -712,6 +856,12 @@ def parse_project(target: str | Path) -> ParsedProject:
 
         aliases = _imports(tree)
         path_bindings = _module_path_bindings(tree, aliases)
+        wildcard_imports = tuple(
+            (_node_line_number(node), node.module or "." * node.level)
+            for node in tree.body
+            if isinstance(node, ast.ImportFrom)
+            and any(item.name == "*" for item in node.names)
+        )
         for node in tree.body:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -720,6 +870,7 @@ def parse_project(target: str | Path) -> ParsedProject:
                 node,
                 aliases,
                 path_bindings,
+                wildcard_imports=wildcard_imports,
             )
             for decorator in node.decorator_list:
                 if not _is_tool_decorator(decorator):
@@ -735,6 +886,7 @@ def parse_project(target: str | Path) -> ParsedProject:
                             relative,
                             f"invalid tool metadata: {message}",
                             line_number=_node_line_number(decorator),
+                            status=AnalysisStatus.PARTIAL,
                         ),
                     ):
                         return _finish_project(project)
@@ -748,8 +900,15 @@ def parse_project(target: str | Path) -> ParsedProject:
                         end_line=node.end_lineno or node.lineno,
                         parameters=_extract_parameters(node),
                         annotations=annotations,
+                        wrapper_expressions=tuple(
+                            (_node_line_number(item), _safe_unparse(item))
+                            for item in node.decorator_list
+                            if item is not decorator
+                        ),
                     )
                 )
                 break
+
+        project.potential_registrations.extend(_potential_registrations(tree, relative))
 
     return _finish_project(project)

@@ -6,8 +6,13 @@ import hashlib
 import json
 from pathlib import Path
 
-from .analyzer import analyze_capabilities, analyze_contract
-from .models import AuditReport
+from .analyzer import analyze_capabilities, analyze_contract, analyze_reachability
+from .models import (
+    AnalysisCompleteness,
+    AnalysisNotification,
+    AnalysisStatus,
+    AuditReport,
+)
 from .parser import parse_project
 
 
@@ -42,7 +47,39 @@ def _snapshot_payload(report: AuditReport) -> bytes:
                 ],
             }
         )
-    return json.dumps(tools, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    payload = {
+        "tools": tools,
+        "completeness": {
+            "status": report.completeness.status.value,
+            "supported_registrations": report.completeness.supported_registrations,
+            "unresolved_registrations": report.completeness.unresolved_registrations,
+            "resolved_edges": [
+                {
+                    "tool": edge.tool_name,
+                    "source": edge.source_file,
+                    "line": edge.line_number,
+                    "caller": edge.caller,
+                    "call": edge.call_expression,
+                    "target_source": edge.target_file,
+                    "target_symbol": edge.target_symbol,
+                }
+                for edge in report.completeness.resolved_edges
+            ],
+            "unresolved_edges": [
+                {
+                    "tool": edge.tool_name,
+                    "source": edge.source_file,
+                    "line": edge.line_number,
+                    "caller": edge.caller,
+                    "call": edge.call_expression,
+                    "reason": edge.reason.value,
+                    "candidate": edge.candidate,
+                }
+                for edge in report.completeness.unresolved_edges
+            ],
+        },
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def audit(target: str | Path) -> AuditReport:
@@ -51,12 +88,113 @@ def audit(target: str | Path) -> AuditReport:
     project = parse_project(target)
     capabilities = {}
     findings = []
+    resolved_edges = []
+    unresolved_edges = []
+    graph_budget_exceeded = False
     for tool in project.tools:
+        tool_resolved, tool_unresolved, tool_budget_exceeded = analyze_reachability(
+            project,
+            tool,
+        )
+        resolved_edges.extend(tool_resolved)
+        unresolved_edges.extend(tool_unresolved)
+        graph_budget_exceeded = graph_budget_exceeded or tool_budget_exceeded
         tool_capabilities = analyze_capabilities(project, tool)
         capabilities[tool.key] = tool_capabilities
         findings.extend(analyze_contract(project, tool, tool_capabilities))
 
     findings.sort(key=lambda item: (-int(item.severity), item.rule_id, item.tool_name))
+    resolved_edges = list(
+        {
+            (
+                edge.tool_name,
+                edge.source_file,
+                edge.line_number,
+                edge.caller,
+                edge.call_expression,
+                edge.target_file,
+                edge.target_symbol,
+            ): edge
+            for edge in resolved_edges
+        }.values()
+    )
+    unresolved_edges = list(
+        {
+            (
+                edge.tool_name,
+                edge.source_file,
+                edge.line_number,
+                edge.caller,
+                edge.call_expression,
+                edge.reason,
+                edge.candidate,
+            ): edge
+            for edge in unresolved_edges
+        }.values()
+    )
+    resolved_edges.sort(
+        key=lambda edge: (
+            edge.tool_name,
+            edge.source_file,
+            edge.line_number,
+            edge.caller,
+            edge.target_file,
+            edge.target_symbol,
+        )
+    )
+    unresolved_edges.sort(
+        key=lambda edge: (
+            edge.tool_name,
+            edge.source_file,
+            edge.line_number,
+            edge.caller,
+            edge.reason.value,
+            edge.call_expression,
+        )
+    )
+    notifications = []
+    failed_diagnostic = any(
+        diagnostic.status is AnalysisStatus.FAILED for diagnostic in project.diagnostics
+    )
+    partial_diagnostic = any(
+        diagnostic.status is AnalysisStatus.PARTIAL for diagnostic in project.diagnostics
+    )
+    if graph_budget_exceeded:
+        notifications.append(
+            AnalysisNotification(
+                "MSC-ANALYSIS-BUDGET",
+                "analysis failed because the local call-edge budget was exhausted",
+            )
+        )
+    if failed_diagnostic or graph_budget_exceeded:
+        status = AnalysisStatus.FAILED
+    elif (
+        partial_diagnostic
+        or unresolved_edges
+        or project.potential_registrations
+    ):
+        status = AnalysisStatus.PARTIAL
+    elif not project.tools:
+        status = AnalysisStatus.FAILED
+        notifications.append(
+            AnalysisNotification(
+                "MSC-NO-SUPPORTED-TOOLS",
+                "analysis failed because no supported MCP tool registrations were found",
+            )
+        )
+    else:
+        status = AnalysisStatus.COMPLETE
+    completeness = AnalysisCompleteness(
+        status=status,
+        supported_registrations=len(project.tools),
+        unresolved_registrations=sum(
+            item.potential_tool_count for item in project.potential_registrations
+        ),
+        resolved_edges=resolved_edges,
+        unresolved_edges=unresolved_edges,
+        potential_registrations=project.potential_registrations,
+        notifications=notifications,
+    )
     report = AuditReport(
         target=project.root,
         files_scanned=project.files_scanned,
@@ -64,6 +202,7 @@ def audit(target: str | Path) -> AuditReport:
         capabilities=capabilities,
         findings=findings,
         diagnostics=project.diagnostics,
+        completeness=completeness,
         snapshot="",
     )
     report.snapshot = hashlib.sha256(_snapshot_payload(report)).hexdigest()
