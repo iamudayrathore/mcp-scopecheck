@@ -412,14 +412,18 @@ class CrossModuleTests(unittest.TestCase):
                     ),
                     "pkg/server.py": "\n".join(
                         [
+                            "from pathlib import Path",
                             "from .guarded import read_guarded",
                             "from .manager import Manager",
+                            "ROOT = Path('/srv/data')",
                             "@mcp.tool()",
                             "def safe(path: str):",
                             "    return read_guarded(path)",
                             "@mcp.tool()",
                             "def unknown(path: str, manager: Manager):",
-                            "    return manager.read(path)",
+                            "    candidate = (ROOT / path).resolve()",
+                            "    candidate.relative_to(ROOT)",
+                            "    return manager.read(candidate)",
                         ]
                     ),
                 },
@@ -438,6 +442,29 @@ class CrossModuleTests(unittest.TestCase):
             any(item.code == "MSC103-GUARD-UNKNOWN" for item in report.completeness.notifications)
         )
         self.assertEqual(report.completeness.status, AnalysisStatus.PARTIAL)
+
+    def test_msc103_is_suppressed_when_a_wrapper_may_own_the_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _sources(
+                root,
+                {
+                    "server.py": "\n".join(
+                        [
+                            "@validation_wrapper",
+                            "@mcp.tool()",
+                            "def entry(path: str):",
+                            "    return open(path).read()",
+                        ]
+                    )
+                },
+            )
+            report = audit(root)
+
+        self.assertNotIn("MSC103", {finding.rule_id for finding in report.findings})
+        self.assertTrue(
+            any(item.code == "MSC103-GUARD-UNKNOWN" for item in report.completeness.notifications)
+        )
 
     def test_msc105_does_not_cross_function_or_module_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

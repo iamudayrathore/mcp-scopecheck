@@ -40,6 +40,7 @@ MAX_TOTAL_SOURCE_BYTES = 20_000_000
 MAX_TOTAL_AST_NODES = 500_000
 MAX_AST_DEPTH = 200
 MAX_DIAGNOSTICS = 100
+MAX_POTENTIAL_REGISTRATIONS = 1_000
 MAX_METADATA_NODES = 256
 MAX_METADATA_DEPTH = 12
 MAX_METADATA_STRING_BYTES = 16_384
@@ -667,7 +668,7 @@ def _module_path_bindings(tree: ast.Module, imports: dict[str, str]) -> frozense
 def _candidate_files(target: Path) -> Iterable[Path]:
     if target.is_file():
         if target.suffix != ".py":
-            raise ParseTargetError("v0.1 accepts a Python file or a directory containing Python")
+            raise ParseTargetError("v0.2 accepts a Python file or a directory containing Python")
         yield target
         return
 
@@ -752,6 +753,16 @@ def _finish_project(project: ParsedProject) -> ParsedProject:
         unique_registrations.values(),
         key=lambda item: (item.source_file, item.line_number, item.expression, item.reason),
     )
+    if len(project.potential_registrations) > MAX_POTENTIAL_REGISTRATIONS:
+        project.potential_registrations = project.potential_registrations[
+            :MAX_POTENTIAL_REGISTRATIONS
+        ]
+        message = (
+            "analysis incomplete: potential MCP registration count exceeds "
+            f"limit of {MAX_POTENTIAL_REGISTRATIONS}"
+        )
+        if not any(item.message == message for item in project.diagnostics):
+            _add_diagnostic(project, Diagnostic("<target>", message))
     return project
 
 
@@ -921,13 +932,18 @@ def parse_project(target: str | Path) -> ParsedProject:
                     node,
                 )
                 for message in metadata_errors:
+                    diagnostic_status = (
+                        AnalysisStatus.FAILED
+                        if "exceeds" in message
+                        else AnalysisStatus.PARTIAL
+                    )
                     if not _add_diagnostic(
                         project,
                         Diagnostic(
                             relative,
                             f"invalid tool metadata: {message}",
                             line_number=_node_line_number(decorator),
-                            status=AnalysisStatus.PARTIAL,
+                            status=diagnostic_status,
                         ),
                     ):
                         return _finish_project(project)

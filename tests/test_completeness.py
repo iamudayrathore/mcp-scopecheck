@@ -181,6 +181,17 @@ class CompletenessTests(unittest.TestCase):
         self.assertTrue(report.completeness.notifications)
         self.assertFalse(sentinel.exists())
 
+    def test_potential_registration_budget_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write(root, "mcp.add_tool(first)\nmcp.add_tool(second)\n")
+            with patch("mcp_scopecheck.parser.MAX_POTENTIAL_REGISTRATIONS", 1):
+                report = audit(root)
+
+        self.assertEqual(report.completeness.status, AnalysisStatus.FAILED)
+        self.assertEqual(len(report.completeness.potential_registrations), 1)
+        self.assertTrue(report.diagnostics)
+
     def test_untrusted_ledger_text_is_sanitized(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

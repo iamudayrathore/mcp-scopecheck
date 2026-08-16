@@ -120,7 +120,14 @@ def audit(target: str | Path) -> AuditReport:
             capability_budget_exceeded or tool_capability_budget
         )
         capabilities[tool.key] = tool_capabilities
-        findings.extend(analyze_contract(project, tool, tool_capabilities))
+        findings.extend(
+            analyze_contract(
+                project,
+                tool,
+                tool_capabilities,
+                tool_unresolved,
+            )
+        )
 
     findings.sort(key=lambda item: (-int(item.severity), item.rule_id, item.tool_name))
     resolved_edges = list(

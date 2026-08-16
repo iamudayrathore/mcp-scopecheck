@@ -28,6 +28,6 @@ Completeness (complete)
     none
 
 Findings (0)
-  No contract mismatches or high-risk behavior detected by the v0.1 rules.
+  No contract mismatches or high-risk behavior detected by the v0.2 rules.
 
 Limit: a clean static scan is not proof of safe runtime behavior.

@@ -1,0 +1,64 @@
+# Limitations
+
+MCP ScopeCheck v0.2.0 performs bounded Python AST analysis over a local file or
+directory. It never imports or executes audited source, starts an MCP server,
+installs target dependencies, or inspects installed packages.
+
+## Meaning of complete and clean
+
+`complete` means that supported registrations and reachable project-local calls
+were analyzed within the documented syntax and resource limits. It does not mean
+that every behavior possible at runtime was modeled. A clean exit `0` additionally
+means that no finding met the configured threshold. Neither state proves that a
+server is safe.
+
+`partial` means ScopeCheck recognized a reachable local edge or potential tool
+registration that it could not analyze without guessing. `failed` means source,
+filesystem, parser, encoding, or resource-budget failure prevented a trustworthy
+bounded result. Both states exit `2`; findings already supported by evidence are
+still reported.
+
+## Supported local calls
+
+Cross-module resolution is limited to static relative or absolute in-root Python
+imports, direct imported functions and aliases, qualified local-module function
+calls, and one explicit named `__init__.py` re-export. A target must resolve to
+exactly one accepted source file and one module-level function. Cycles terminate
+through visited-state tracking.
+
+The following remain unresolved and make relevant analysis partial when they are
+statically recognizable:
+
+- class and instance dispatch;
+- callbacks, closures, lambdas, partials, assigned function aliases, and other
+  higher-order calls;
+- wrapper or decorator transformations;
+- wildcard and dynamic imports;
+- ambiguous or missing local targets and deeper re-export chains;
+- runtime, low-level Tool-list, `add_tool`, nested, and class-owned registration
+  forms.
+
+## Rule boundaries
+
+Cross-module capability facts can inform `MSC101`, `MSC102`, `MSC106`, `MSC107`,
+and `MSC108`. `MSC103` requires supported argument lineage and recognized guard
+state across the path; otherwise the inference is suppressed and incompleteness
+is reported. `MSC105` remains same-function. v0.2.0 does not implement
+cross-module environment-to-network taint or general interprocedural data flow.
+
+Capabilities are evidence, not automatic vulnerabilities. ScopeCheck does not
+prove authorization correctness, SSRF safety, SQL safety, shell safety, symlink
+safety, time-of-check/time-of-use safety, or runtime policy enforcement. Network
+and filesystem sink coverage is deliberately allowlisted and incomplete.
+
+## Language and output boundaries
+
+Only Python 3.11+ syntax is supported. JavaScript, TypeScript, manifests, package
+metadata, dependency internals, and running services are outside the analyzer.
+Plain text and SARIF expose the same findings and completeness state; SARIF
+execution notifications are not vulnerability findings.
+
+The v0.2 design was informed by a curated 15-repository corpus containing 420
+statically visible tools, of which v0.1.2 discovered 377. These measurements are
+bounded design evidence, not ecosystem-wide precision, recall, or prevalence
+claims.

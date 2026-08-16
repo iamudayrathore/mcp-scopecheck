@@ -173,7 +173,7 @@ def render_report(report: AuditReport) -> str:
 
     lines.append(f"Findings ({len(report.findings)})")
     if not report.findings:
-        lines.append("  No contract mismatches or high-risk behavior detected by the v0.1 rules.")
+        lines.append("  No contract mismatches or high-risk behavior detected by the v0.2 rules.")
     else:
         for finding in report.findings:
             lines.extend(

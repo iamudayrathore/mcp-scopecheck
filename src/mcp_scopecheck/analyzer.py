@@ -2162,6 +2162,7 @@ def analyze_contract(
     project: ParsedProject,
     tool: ToolDefinition,
     observed: list[ObservedCapability],
+    unresolved_edges: Iterable[UnresolvedCallEdge] = (),
 ) -> list[Finding]:
     """Compare declared tool behavior with statically observed capabilities."""
 
@@ -2303,7 +2304,8 @@ def analyze_contract(
     }
     records = reachable_functions(project, tool)
     path_scope = _path_scope_result(project, tool, path_parameters)
-    if path_scope.sinks:
+    path_guard_state_unresolved = bool(path_parameters) and any(unresolved_edges)
+    if path_scope.sinks and not path_guard_state_unresolved:
         unguarded_parameters = sorted(
             source
             for sink in path_scope.sinks
