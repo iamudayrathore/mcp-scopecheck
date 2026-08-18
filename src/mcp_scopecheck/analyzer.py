@@ -192,58 +192,115 @@ BENIGN_SECURITY_DISCUSSION = re.compile(
     re.I | re.S,
 )
 
+# --- MSC102 network-egress disclosure (conservative, fail-safe) ---
+# ScopeCheck proves reachable network egress from the call graph; that fact is
+# always reported as an observed capability. Deciding whether a natural-language
+# description *discloses* that egress cannot be done reliably by pattern matching,
+# so this check errs toward flagging: reachable egress is treated as undisclosed
+# unless the description explicitly denies it, names a mismatched destination, or
+# clearly and affirmatively describes the egress. Over-flagging a call that was
+# in fact disclosed is a safe, correctable error a reader dismisses at a glance;
+# staying silent on a hidden call is the failure a security scanner must avoid.
+_SERVICE_NAMES = ("discord", "github", "gitlab", "gmail", "google", "slack")
+KNOWN_DESTINATIONS = frozenset(_SERVICE_NAMES)
+_SERVICE_ALT = "|".join(_SERVICE_NAMES)
+
+# Sentence segmentation used for negation scoping. Newlines are boundaries so an
+# unpunctuated bullet/argument block does not merge into one span.
+_SENTENCE_SPLIT = re.compile(r"[.!?;\n\r]+")
+_NEGATION = re.compile(
+    r"\b(?:not|never|no|without|cannot|can't|won't|will\s+not|shall\s+not|"
+    r"does\s+not|doesn't|do\s+not|don't|didn't|isn't|aren't|n't)\b",
+    re.I,
+)
+
+# Explicit denial of network access -> a contradiction when egress is reachable.
+# The negation must attach to the egress verb (0-1 words apart) so unrelated
+# negations such as "does not require an API key to access the endpoint" do not
+# read as denials.
+_DENIAL_VERB = (
+    r"(?:access(?:es|ed|ing)?|call(?:s|ed|ing)?|connect(?:s|ed|ing)?|"
+    r"contact(?:s|ed|ing)?|download(?:s|ed|ing)?|fetch(?:es|ed|ing)?|"
+    r"quer(?:y|ies|ied|ying)|reach(?:es|ed|ing)?|request(?:s|ed|ing)?|"
+    r"send(?:s|ing)?|sent|talk(?:s|ed|ing)?|transmit(?:s|ted|ting)?|"
+    r"upload(?:s|ed|ing)?|us(?:e|es|ed|ing))"
+)
+_DENIAL_TARGET = (
+    r"(?:internet|network|remote|external|online|endpoint|server|cloud|web|url|"
+    r"outbound|" + _SERVICE_ALT + r")"
+)
 NETWORK_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
-        r"\b(?:never|does\s+not|doesn't|do\s+not|don't)\b.{0,40}"
-        r"\b(?:access|call|connect|contact|download|fetch|quer(?:y|ies)|"
-        r"request|send|transmit|upload|use)\w*\b.{0,32}"
-        r"\b(?:internet|network|remote|external|endpoint|data)\b",
-        re.I | re.S,
+        r"\b(?:never|not|cannot|can't|won't|will\s+not|shall\s+not|"
+        r"do(?:es)?\s+not|don't|doesn't)\s+(?:\w+\s+){0,1}"
+        + _DENIAL_VERB + r"\s+(?:\w+\s+){0,4}?" + _DENIAL_TARGET + r"\b",
+        re.I,
     ),
     re.compile(
         r"\b(?:no|without)\s+"
-        r"(?:external\s+|internet\s+|network\s+|remote\s+)?"
+        r"(?:external\s+|internet\s+|network\s+|remote\s+|outbound\s+)?"
         r"(?:access|connection|egress|requests?|traffic)\b",
         re.I,
     ),
     re.compile(
-        r"\b(?:fully\s+local|local[- ]only|offline(?:[- ]only)?|"
-        r"runs?\s+(?:locally|offline)(?:\s+only)?)\b",
+        r"\b(?:fully\s+local|local[- ]only|offline(?:[- ]only)?|air[- ]gapped|"
+        r"runs?\s+(?:locally|offline)(?:\s+only)?|"
+        r"(?:no\s+data|nothing)\s+(?:ever\s+)?leaves|"
+        r"stays?\s+(?:entirely\s+|fully\s+)?on\s+(?:your|the\s+local)|"
+        r"no\s+outbound\s+traffic)\b",
         re.I,
     ),
 )
-# Disclosure requires an interaction verb and an external target bound inside one
-# sentence; no single word (bare "URL", bare "endpoint", a generic verb, or an
-# unbound service name) counts on its own.
-_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?;])\s+")
-_SERVICE_NAMES = r"(?:discord|github|gitlab|gmail|google|slack)"
-_TARGET_FILLER = r"(?:[\w()'’/.-]+\s+){0,2}?"
-_TARGET_FILLER_LONG = r"(?:[\w()'’/.-]+\s+){0,3}?"
-NETWORK_INTERACTION = re.compile(
-    r"\b(?:calls?|called|calling|connects?|connected|connecting|"
-    r"contacts?|contacted|contacting|creates?|created|creating|"
-    r"downloads?|downloaded|downloading|fetch(?:es|ed|ing)?|"
-    r"forwards?|forwarded|forwarding|gets?|getting|"
-    r"imports?|imported|importing|posts?|posted|posting|"
-    r"publish(?:es|ed|ing)?|quer(?:y|ies|ied|ying)|"
-    r"requests?|requested|requesting|retriev(?:e|es|ed|ing)|"
-    r"sends?|sending|sent|transmits?|transmitted|transmitting|"
-    r"uploads?|uploaded|uploading|us(?:e|es|ed|ing))\b",
-    re.I,
+
+# High-precision affirmative descriptions of external network egress. A benign,
+# local-only tool essentially never contains these; matching one (when not
+# negated in the same sentence) is treated as clear disclosure.
+NETWORK_DISCLOSURE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bover\s+the\s+(?:internet|network|wire|web)\b", re.I),
+    re.compile(
+        r"\b(?:make|makes|making|made|issue|issues|issuing|issued|"
+        r"perform|performs|performing|performed|open|opens|opening|opened|"
+        r"send|sends|sending|sent)\s+(?:an?\s+|a\s+new\s+|out\s+)?"
+        r"(?:https?|network|web|rest|api|outbound|remote|external|"
+        r"outgoing)\s+(?:requests?|calls?|connections?|quer(?:y|ies))\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:connect|connects|connecting|connected)\s+to\s+"
+        r"(?:a\s+|an\s+|the\s+)?(?:remote|external|internet|cloud|" + _SERVICE_ALT + r")\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:download|downloads|downloading|downloaded|fetch|fetches|fetching|"
+        r"fetched|retrieve|retrieves|retrieving|retrieved|pull|pulls|pulling|"
+        r"pulled|import|imports|importing|imported|get|gets|getting|got|"
+        r"receive|receives|receiving|received)\b[^.!?;]{0,40}?\bfrom\s+"
+        r"(?:the\s+|a\s+|an\s+|its\s+|your\s+|this\s+|that\s+)?(?:\w+\s+){0,2}?"
+        r"(?:internet|web|network|remote|external|online|hosted|public|"
+        r"third[- ]party|cloud|upstream|url|" + _SERVICE_ALT + r")\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:upload|uploads|uploading|uploaded|post|posts|posting|posted|"
+        r"publish|publishes|publishing|published|transmit|transmits|transmitting|"
+        r"transmitted|push|pushes|pushing|pushed|sync|syncs|syncing|synced|"
+        r"forward|forwards|forwarding|forwarded|send|sends|sending|sent)\b"
+        r"[^.!?;]{0,40}?\bto\s+(?:the\s+|a\s+|an\s+|your\s+)?(?:internet|cloud|"
+        r"network|remote|external|online|third[- ]party|hosted|public|upstream|"
+        + _SERVICE_ALT + r")\b",
+        re.I,
+    ),
+    re.compile(
+        r"\bsends?\s+(?:an?\s+|the\s+|out\s+)?(?:email|message|notification|"
+        r"webhook|payload)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:" + _SERVICE_ALT + r")(?:'s|’s)?\s+"
+        r"(?:accounts?|drives?|inbox(?:es)?|mailbox(?:es)?|workspaces?|channels?)\b",
+        re.I,
+    ),
 )
-EXTERNAL_TARGET = re.compile(
-    r"\b(?:the\s+)?internet\b|\bpublic\s+web\b|\bworld\s+wide\s+web\b|"
-    rf"\b(?:remote|external|public|hosted|online|third[- ]party)\s+{_TARGET_FILLER}"
-    r"(?:apis?|endpoints?|services?|servers?|hosts?|urls?)\b|"
-    rf"\bdownload\w{{0,3}}\s+{_TARGET_FILLER}urls?\b|"
-    rf"\b(?:from|to|via)\s+{_TARGET_FILLER_LONG}urls?\b|"
-    rf"\b(?:to|into|from|through|via|using)\s+{_TARGET_FILLER_LONG}{_SERVICE_NAMES}\b|"
-    rf"\b{_SERVICE_NAMES}(?:'s|’s)?\s+(?:accounts?|apis?|drives?|inbox(?:es)?|workspaces?)\b|"
-    r"\b(?:api\.|hooks\.|webhook\.)[a-z0-9.-]+\b|"
-    r"\b[a-z0-9-]+\.(?:com|dev|io|net|org)(?:\b|/)",
-    re.I,
-)
-KNOWN_DESTINATIONS = frozenset({"discord", "github", "gitlab", "gmail", "google", "slack"})
 MAX_RESOLVED_LOCAL_EDGES = 20_000
 MAX_UNRESOLVED_LOCAL_EDGES = 1_000
 MAX_LOCAL_MODULES = 2_000
@@ -288,53 +345,106 @@ def _poisoning_indicator(description: str) -> _DescriptionIndicator | None:
     return matches[0]
 
 
+# Public registrable domains for each named service. A reachable host discloses a
+# named service only when its registrable domain (eTLD+1) is on that service's
+# list, so a typosquat or subdomain-prefix host (github.evil-collector.example,
+# gmail-x.attacker.example) never matches while api.github.com, hooks.slack.com,
+# and gmail.googleapis.com do.
+_SERVICE_DOMAINS: dict[str, frozenset[str]] = {
+    "discord": frozenset({"discord.com", "discordapp.com", "discord.gg"}),
+    "github": frozenset({"github.com", "github.io", "githubusercontent.com"}),
+    "gitlab": frozenset({"gitlab.com", "gitlab.io"}),
+    "gmail": frozenset({"gmail.com", "google.com", "googleapis.com", "googleusercontent.com"}),
+    "google": frozenset({"google.com", "googleapis.com", "googleusercontent.com", "gstatic.com"}),
+    "slack": frozenset({"slack.com", "slack-edge.com", "slackb.com"}),
+}
+
+
+def _registrable_domain(host: str) -> str:
+    """Approximate the registrable domain (eTLD+1) as the last two DNS labels."""
+
+    labels = [label for label in host.lower().split(".") if label]
+    return ".".join(labels[-2:]) if len(labels) >= 2 else host.lower()
+
+
+def _host_matches_service(host: str, service: str) -> bool:
+    """True when a reachable host's registrable domain belongs to a named service."""
+
+    return _registrable_domain(host) in _SERVICE_DOMAINS.get(service, frozenset())
+
+
+def _sentences(description: str) -> list[str]:
+    return [
+        " ".join(fragment.split())
+        for fragment in _SENTENCE_SPLIT.split(description)
+        if fragment.strip()
+    ]
+
+
 def _assess_network_disclosure(
     description: str,
     static_hosts: Iterable[str] = (),
 ) -> _DisclosureAssessment:
+    sentences = _sentences(description)
     normalized = " ".join(description.split())
-    for pattern in NETWORK_DENIAL_PATTERNS:
-        denial = pattern.search(normalized)
-        if denial is not None:
-            return _DisclosureAssessment(
-                False,
-                f"description contradicts reachable egress with denial {denial.group(0)!r}",
-                contradiction=True,
-            )
+    normalized_lower = normalized.lower()
 
-    interaction: re.Match[str] | None = None
-    target: re.Match[str] | None = None
-    for sentence in _SENTENCE_BOUNDARY.split(normalized):
-        sentence_interaction = NETWORK_INTERACTION.search(sentence)
-        sentence_target = EXTERNAL_TARGET.search(sentence)
-        if sentence_interaction is not None and sentence_target is not None:
-            interaction = sentence_interaction
-            target = sentence_target
-            break
-    if interaction is None or target is None:
-        return _DisclosureAssessment(
-            False,
-            "description does not bind an interaction action to an external "
-            "target within one sentence",
-        )
+    # 1. Explicit denial of network access, scoped to a sentence -> contradiction.
+    for sentence in sentences:
+        for pattern in NETWORK_DENIAL_PATTERNS:
+            denial = pattern.search(sentence)
+            if denial is not None:
+                return _DisclosureAssessment(
+                    False,
+                    "description contradicts reachable egress with denial "
+                    f"{denial.group(0)!r}",
+                    contradiction=True,
+                )
 
-    hosts = tuple(sorted(set(static_hosts)))
-    destination_terms = {
-        term for term in KNOWN_DESTINATIONS if re.search(rf"\b{term}\b", normalized, re.I)
-    }
-    if hosts and destination_terms and not any(
-        term in host for term in destination_terms for host in hosts
+    hosts = tuple(sorted({host.lower() for host in static_hosts if host}))
+    described = sorted(
+        service
+        for service in KNOWN_DESTINATIONS
+        if re.search(rf"\b{service}\b", normalized, re.I)
+    )
+
+    # 2. A named destination that matches no reachable host -> mismatch.
+    if hosts and described and not any(
+        _host_matches_service(host, service) for service in described for host in hosts
     ):
         return _DisclosureAssessment(
             False,
-            "described destination "
-            f"{sorted(destination_terms)!r} does not match static host(s) {list(hosts)!r}",
+            f"described destination {described!r} does not match "
+            f"static host(s) {list(hosts)!r}",
         )
 
+    # 3. Strongest disclosure: the description names the reachable destination.
+    if hosts and (
+        any(host in normalized_lower for host in hosts)
+        or any(
+            _host_matches_service(host, service)
+            for service in described
+            for host in hosts
+        )
+    ):
+        return _DisclosureAssessment(True, "description names the reachable destination")
+
+    # 4. Clear affirmative egress phrasing that is not negated within its sentence.
+    for sentence in sentences:
+        if _NEGATION.search(sentence):
+            continue
+        for pattern in NETWORK_DISCLOSURE_PATTERNS:
+            match = pattern.search(sentence)
+            if match is not None:
+                return _DisclosureAssessment(
+                    True,
+                    f"description states external network egress: {match.group(0)!r}",
+                )
+
+    # 5. Fail safe: reachable egress is not clearly disclosed.
     return _DisclosureAssessment(
-        True,
-        f"matched external target {target.group(0)!r} and action "
-        f"{interaction.group(0)!r} in one sentence",
+        False,
+        "description does not clearly disclose the reachable network egress",
     )
 
 

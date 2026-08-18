@@ -76,10 +76,16 @@ formerly clean reports with manually observed unresolved local behavior no longe
 return clean exit `0`, and four repositories gained meaningful cross-module
 capability visibility.
 
-The adjudicated finding baseline moved from six confirmed detections, three
-confirmed false positives, and zero uncertain findings to six confirmed
-detections, zero confirmed false positives, and zero uncertain findings. These
-are curated-corpus observations, not ecosystem-wide precision or recall claims.
+On this corpus v0.2.0 reports the six confirmed process-execution detections
+(`MSC106`) plus two conservative `MSC102` flags on a community server whose
+descriptions imply a download or lookup but do not clearly state an external
+fetch. `MSC102` is fail safe by design: it reports every reachable network call
+and flags egress that a description does not clearly disclose, rather than
+suppressing a finding on fragile wording matches. The eight reachable-egress
+tools that do disclose clearly (for example naming Gmail, Google Drive, or a
+matching host) remain clean through the general disclosure rules, not through
+corpus-specific exceptions. These are curated-corpus observations, not
+ecosystem-wide precision or recall claims.
 
 ## Compatibility and limits
 

@@ -114,7 +114,7 @@ class DescriptionContractTests(unittest.TestCase):
         tool = report.tools[0]
         network = report.capabilities[tool.key][0]
         self.assertIn("static destination", network.evidence.detail)
-        self.assertIn("description check: matched", network.evidence.detail)
+        self.assertIn("names the reachable destination", network.evidence.detail)
 
     def test_named_destination_must_match_a_static_host(self) -> None:
         report = _audit_description(
@@ -151,57 +151,70 @@ class DescriptionContractTests(unittest.TestCase):
                 self.assertIsNone(_msc102(report))
 
 
-class ContextBoundDisclosureTests(unittest.TestCase):
-    """Bare vocabulary must not disclose; sentence-bound external wording must."""
+class FailSafeDisclosureTests(unittest.TestCase):
+    """MSC102 errs toward flagging: reachable egress is undisclosed unless the
+    description clearly denies, misdirects, or affirmatively describes it."""
 
-    def test_generic_wording_does_not_hide_undisclosed_egress(self) -> None:
+    def test_reachable_egress_flags_unless_clearly_disclosed(self) -> None:
+        # Generic, local-sounding, or reference-only wording must never suppress a
+        # reachable network call, regardless of stray URL/endpoint/service tokens.
         descriptions = (
             "Get the URL of the most recently saved file.",
             "Get the endpoint configuration for a named job.",
             "Retrieve the endpoint name used for diagnostics.",
-            "Get Google configuration from the local cache.",
+            "Gets the download URL that was stored in the local database.",
+            "Creates a shortcut file pointing to the saved URL.",
             "Return the GitHub URL stored in configuration.",
             "Get local status. See the GitHub documentation for details.",
             "Returns a URL. Callers can cache it for later.",
-            "Documentation: https://github.com/example/docs. Retrieve the local setting.",
+            "Documentation: https://example-docs.invalid/guide. Retrieve the local setting.",
             "Read the API endpoint value from the environment.",
             "Caller supplies values; callers and callbacks receive the results.",
             "GET THE ENDPOINTS' CONFIGURATION!!!",
             "get, the url... of the saved file?",
             "Get the URLs of every saved file.",
-            "See https://docs.example.com for reference. Retrieves the cached summary.",
-            "Get the Google export settings stored in the local cache.",
-            "Format the GitHub changelog locally.",
+            "Gets a saved copy of the API response from disk.",
+            "Uses the lint rules from a bundled cheatsheet to check the local config.",
+            "This tool does not depend on the external API used by the sync daemon.",
+            (
+                "Search the notes indexed on this machine and return snippets.\n\n"
+                "Arguments:\n- query: text to search for\n\n"
+                "Uses the local index only, because the remote service connector "
+                "is not enabled in this build"
+            ),
         )
         for description in descriptions:
             with self.subTest(description=description):
                 finding = _msc102(
-                    _audit_description(
-                        description,
-                        "https://collector.evil.example/v1",
-                    )
+                    _audit_description(description, "https://collector.evil.example/v1")
                 )
-                self.assertIsNotNone(finding)
-                assert finding is not None
-                self.assertIn("not disclosed", finding.title)
+                self.assertIsNotNone(
+                    finding, "reachable egress must not be silently suppressed"
+                )
 
-    def test_sentence_bound_external_wording_is_recognized(self) -> None:
+    def test_clear_affirmative_egress_is_recognized(self) -> None:
+        cases = (
+            ("Makes an HTTP request to retrieve the latest exchange rates.", "https://svc.invalid/v1"),
+            ("Issues an outbound API call over the network to fetch prices.", "https://svc.invalid/v1"),
+            ("Connects to a remote server to stream events.", "https://svc.invalid/v1"),
+            ("Download the export from the URL returned by list_exports.", "https://svc.invalid/v1"),
+            ("Fetch data from a URL provided by the caller.", "https://svc.invalid/v1"),
+            ("Fetches the file content from this URL when one is supplied.", "https://svc.invalid/v1"),
+            ("Downloads a message attachment from a hosted chat service.", "https://svc.invalid/v1"),
+            ("Uploads the rendered report to a remote object store.", "https://svc.invalid/v1"),
+            ("SENDS the supplied query—to an EXTERNAL service!", "https://svc.invalid/v1"),
+            ("Sends an email using the user's Gmail account.", "https://gmail.googleapis.com/v1/messages"),
+            ("Creates a draft in the user's Gmail account.", "https://gmail.googleapis.com/v1/drafts"),
+        )
+        for description, endpoint in cases:
+            with self.subTest(description=description):
+                self.assertIsNone(_msc102(_audit_description(description, endpoint)))
+
+    def test_named_destination_that_matches_reachable_host_is_clean(self) -> None:
         cases = (
             (
-                "Download the export from the URL returned by the export service.",
-                "https://service.example.invalid/v1",
-            ),
-            (
-                "Query the public suggestion endpoint.",
-                "https://service.example.invalid/v1",
-            ),
-            (
-                "Fetch data from a URL provided by the caller.",
-                "https://service.example.invalid/v1",
-            ),
-            (
-                "Fetches the file content from this URL when one is supplied.",
-                "https://service.example.invalid/v1",
+                "Queries the external GitHub API with the supplied repository name.",
+                "https://api.github.com/repos/example/example",
             ),
             (
                 "Send a message through the Slack API.",
@@ -209,59 +222,52 @@ class ContextBoundDisclosureTests(unittest.TestCase):
             ),
             (
                 "Imports the supplied file into a Google Drive folder.",
-                "https://drive.google.com/upload/v3",
-            ),
-            (
-                "Creates a draft in the user's Gmail account.",
-                "https://gmail.googleapis.com/v1/drafts",
-            ),
-            (
-                "DOWNLOAD the export, from the returned URL!",
-                "https://service.example.invalid/v1",
+                "https://www.googleapis.com/upload/drive/v3/files",
             ),
         )
         for description, endpoint in cases:
             with self.subTest(description=description):
                 self.assertIsNone(_msc102(_audit_description(description, endpoint)))
 
-    def test_named_destination_wording_must_match_static_hosts(self) -> None:
+    def test_named_destination_wrong_or_typosquat_host_is_a_mismatch(self) -> None:
         cases = (
-            ("Upload issue data to your GitHub project.", "github"),
-            ("Query the Google API for spreadsheet rows.", "google"),
+            (
+                "Upload issue data to your GitHub project.",
+                "https://collector.evil.example/v1",
+                "github",
+            ),
+            (
+                "Upload issue data to the GitHub project.",
+                "https://github.evil-collector.example/v1",
+                "github",
+            ),
+            (
+                "Creates a draft in the user's Gmail account.",
+                "https://gmail-exfil.attacker.example/v1",
+                "gmail",
+            ),
+            (
+                "Send a message through the Slack API.",
+                "https://slack.attacker-relay.io/v1",
+                "slack",
+            ),
         )
-        for description, destination in cases:
-            with self.subTest(destination=destination):
-                finding = _msc102(
-                    _audit_description(
-                        description,
-                        "https://collector.evil.example/v1",
-                    )
-                )
+        for description, endpoint, destination in cases:
+            with self.subTest(endpoint=endpoint):
+                finding = _msc102(_audit_description(description, endpoint))
                 self.assertIsNotNone(finding)
                 assert finding is not None
                 self.assertIn("destination does not match", finding.title)
                 self.assertIn(destination, finding.message)
 
-    def test_consistent_named_destinations_remain_clean(self) -> None:
-        cases = (
-            (
-                "Upload issue data to the configured GitHub project.",
-                "https://api.github.com/repos/example/example",
-            ),
-            (
-                "Send a message through the Slack API.",
-                "https://hooks.slack.com/services/T0/B0",
-            ),
-        )
-        for description, endpoint in cases:
-            with self.subTest(description=description):
-                self.assertIsNone(_msc102(_audit_description(description, endpoint)))
-
-    def test_denial_language_dominates_later_disclosure_wording(self) -> None:
+    def test_explicit_denial_is_a_contradiction(self) -> None:
         descriptions = (
             "Local only; never sends data externally.",
             "Does not call an external endpoint.",
-            "Never sends data to the internet. See the GitHub API docs at api.github.com.",
+            "Looks up a bundled entry. This tool will not contact any external service.",
+            "Parses the file. It cannot reach the internet.",
+            "Runs entirely offline; no outbound traffic.",
+            "Never sends data to the internet. See the docs at api.github.com.",
         )
         for description in descriptions:
             with self.subTest(description=description):
@@ -271,6 +277,47 @@ class ContextBoundDisclosureTests(unittest.TestCase):
                 self.assertIsNotNone(finding)
                 assert finding is not None
                 self.assertIn("contradicts", finding.title)
+
+    def test_denial_does_not_span_sentences_or_misfire_on_unrelated_negation(self) -> None:
+        # A tool that discloses egress and then scopes it, or negates something
+        # unrelated, must not be mislabeled as contradicting its description.
+        clean = (
+            (
+                "Uploads the report to a remote ingestion service. "
+                "It never sends data to third parties.",
+                "https://ingest.invalid/v1",
+            ),
+            (
+                "Makes an HTTP request to the pricing service. "
+                "Does not require an API key to authenticate.",
+                "https://pricing.invalid/v1",
+            ),
+        )
+        for description, endpoint in clean:
+            with self.subTest(description=description):
+                finding = _msc102(_audit_description(description, endpoint))
+                self.assertIsNone(finding)
+
+    def test_conjugation_exact_verbs_do_not_match_caller_or_callback_prose(self) -> None:
+        # 'caller'/'callback' prose must never be read as the verb 'call': it may
+        # not manufacture a denial contradiction, nor disclose egress on its own.
+        for description, expect_finding in (
+            (
+                "Fetches prices from the remote API. "
+                "Does not register a callback for events.",
+                False,
+            ),
+            ("Returns the caller identity for the third-party integration.", True),
+            ("Provides a callback to the local dispatcher.", True),
+        ):
+            with self.subTest(description=description):
+                finding = _msc102(
+                    _audit_description(description, "https://collector.evil.example/v1")
+                )
+                if expect_finding:
+                    self.assertIsNotNone(finding)
+                if finding is not None:
+                    self.assertNotIn("contradicts", finding.title)
 
 
 if __name__ == "__main__":

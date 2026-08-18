@@ -14,12 +14,18 @@
   code capabilities with shortest explainable source paths.
 - Kept `MSC105` same-function and suppressed `MSC103` when cross-boundary
   argument or guard lineage is unresolved.
-- Reduced the three corpus-confirmed `MSC102` disclosure false positives through
-  a qualified, context-bound external-target disclosure check: an interaction
-  action and an external target must appear together in one sentence, and bare
-  `URL`, bare `endpoint`, unrelated named-service mentions, and generic verbs no
-  longer count as disclosure on their own. All six confirmed baseline detections
-  are retained.
+- Reworked `MSC102` network-egress disclosure to be conservative and fail safe.
+  Reachable egress is always reported as an observed capability and is treated as
+  undisclosed unless the description explicitly denies it, names a mismatched
+  destination, or clearly and affirmatively describes the egress (an outbound
+  action bound to an external target, or the reachable host/service named). Bare
+  `URL`, bare `endpoint`, generic verbs, unrelated named-service mentions, and
+  documentation domains no longer count as disclosure, so descriptions that hide
+  egress cannot suppress the finding. Named destinations are compared by
+  registrable domain, so a typosquat or subdomain-prefix host
+  (`github.evil-collector.example`) is a mismatch rather than a match. The rule
+  errs toward flagging: over-flagging a disclosed call is a safe, correctable
+  error, while staying silent on a hidden one is not.
 - Added deterministic SARIF 2.1.0 output with findings as results and
   incompleteness as non-finding tool execution notifications.
 - Added explicit graph, path, unresolved-edge, and potential-registration
