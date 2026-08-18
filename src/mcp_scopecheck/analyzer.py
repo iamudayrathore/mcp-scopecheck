@@ -195,8 +195,9 @@ BENIGN_SECURITY_DISCUSSION = re.compile(
 NETWORK_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"\b(?:never|does\s+not|doesn't|do\s+not|don't)\b.{0,40}"
-        r"\b(?:send|transmit|upload|use|access|connect)\w*\b.{0,24}"
-        r"\b(?:internet|network|remote|external|data)\b",
+        r"\b(?:access|call|connect|contact|download|fetch|quer(?:y|ies)|"
+        r"request|send|transmit|upload|use)\w*\b.{0,32}"
+        r"\b(?:internet|network|remote|external|endpoint|data)\b",
         re.I | re.S,
     ),
     re.compile(
@@ -211,21 +212,38 @@ NETWORK_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
         re.I,
     ),
 )
+# Disclosure requires an interaction verb and an external target bound inside one
+# sentence; no single word (bare "URL", bare "endpoint", a generic verb, or an
+# unbound service name) counts on its own.
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?;])\s+")
+_SERVICE_NAMES = r"(?:discord|github|gitlab|gmail|google|slack)"
+_TARGET_FILLER = r"(?:[\w()'’/.-]+\s+){0,2}?"
+_TARGET_FILLER_LONG = r"(?:[\w()'’/.-]+\s+){0,3}?"
 NETWORK_INTERACTION = re.compile(
-    r"\b(?:call|connect|contact|download|fetch|forward|get|post|publish|quer(?:y|ies)|"
-    r"request|retrieve|send|transmit|upload)\w*\b",
+    r"\b(?:calls?|called|calling|connects?|connected|connecting|"
+    r"contacts?|contacted|contacting|creates?|created|creating|"
+    r"downloads?|downloaded|downloading|fetch(?:es|ed|ing)?|"
+    r"forwards?|forwarded|forwarding|gets?|getting|"
+    r"imports?|imported|importing|posts?|posted|posting|"
+    r"publish(?:es|ed|ing)?|quer(?:y|ies|ied|ying)|"
+    r"requests?|requested|requesting|retriev(?:e|es|ed|ing)|"
+    r"sends?|sending|sent|transmits?|transmitted|transmitting|"
+    r"uploads?|uploaded|uploading|us(?:e|es|ed|ing))\b",
     re.I,
 )
 EXTERNAL_TARGET = re.compile(
-    r"\b(?:external|internet|online|public\s+web|remote|third[- ]party)\b|"
-    r"\b(?:download\s+)?url\b|"
-    r"\b(?:public\s+|hosted\s+)?(?:api\s+)?endpoint\b|"
-    r"\bhosted(?:\s+[a-z0-9-]+)?\s+service\b|"
+    r"\b(?:the\s+)?internet\b|\bpublic\s+web\b|\bworld\s+wide\s+web\b|"
+    rf"\b(?:remote|external|public|hosted|online|third[- ]party)\s+{_TARGET_FILLER}"
+    r"(?:apis?|endpoints?|services?|servers?|hosts?|urls?)\b|"
+    rf"\bdownload\w{{0,3}}\s+{_TARGET_FILLER}urls?\b|"
+    rf"\b(?:from|to|via)\s+{_TARGET_FILLER_LONG}urls?\b|"
+    rf"\b(?:to|into|from|through|via|using)\s+{_TARGET_FILLER_LONG}{_SERVICE_NAMES}\b|"
+    rf"\b{_SERVICE_NAMES}(?:'s|’s)?\s+(?:accounts?|apis?|drives?|inbox(?:es)?|workspaces?)\b|"
     r"\b(?:api\.|hooks\.|webhook\.)[a-z0-9.-]+\b|"
     r"\b[a-z0-9-]+\.(?:com|dev|io|net|org)(?:\b|/)",
     re.I,
 )
-KNOWN_DESTINATIONS = frozenset({"discord", "github", "gitlab", "google", "slack"})
+KNOWN_DESTINATIONS = frozenset({"discord", "github", "gitlab", "gmail", "google", "slack"})
 MAX_RESOLVED_LOCAL_EDGES = 20_000
 MAX_UNRESOLVED_LOCAL_EDGES = 1_000
 MAX_LOCAL_MODULES = 2_000
@@ -284,12 +302,20 @@ def _assess_network_disclosure(
                 contradiction=True,
             )
 
-    interaction = NETWORK_INTERACTION.search(normalized)
-    target = EXTERNAL_TARGET.search(normalized)
+    interaction: re.Match[str] | None = None
+    target: re.Match[str] | None = None
+    for sentence in _SENTENCE_BOUNDARY.split(normalized):
+        sentence_interaction = NETWORK_INTERACTION.search(sentence)
+        sentence_target = EXTERNAL_TARGET.search(sentence)
+        if sentence_interaction is not None and sentence_target is not None:
+            interaction = sentence_interaction
+            target = sentence_target
+            break
     if interaction is None or target is None:
         return _DisclosureAssessment(
             False,
-            "description does not state both an external interaction and an interaction action",
+            "description does not bind an interaction action to an external "
+            "target within one sentence",
         )
 
     hosts = tuple(sorted(set(static_hosts)))
@@ -307,7 +333,8 @@ def _assess_network_disclosure(
 
     return _DisclosureAssessment(
         True,
-        f"matched external target {target.group(0)!r} and action {interaction.group(0)!r}",
+        f"matched external target {target.group(0)!r} and action "
+        f"{interaction.group(0)!r} in one sentence",
     )
 
 

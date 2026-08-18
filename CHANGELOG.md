@@ -15,8 +15,11 @@
 - Kept `MSC105` same-function and suppressed `MSC103` when cross-boundary
   argument or guard lineage is unresolved.
 - Reduced the three corpus-confirmed `MSC102` disclosure false positives through
-  a general URL/endpoint/hosted-service disclosure fix while retaining all six
-  confirmed baseline detections.
+  a qualified, context-bound external-target disclosure check: an interaction
+  action and an external target must appear together in one sentence, and bare
+  `URL`, bare `endpoint`, unrelated named-service mentions, and generic verbs no
+  longer count as disclosure on their own. All six confirmed baseline detections
+  are retained.
 - Added deterministic SARIF 2.1.0 output with findings as results and
   incompleteness as non-finding tool execution notifications.
 - Added explicit graph, path, unresolved-edge, and potential-registration

@@ -146,9 +146,11 @@ context exception avoids treating documentation that discusses common prompt
 injection wording as an instruction. Zero corpus errors describe only the fixed
 local examples; they are not a general accuracy claim.
 
-`MSC102` is deterministic contract-mismatch detection. A disclosure must contain
-both an external target and an interaction action; isolated words such as `API`,
-`web`, `network`, or `remote` are insufficient. Explicit offline/no-network
+`MSC102` is deterministic contract-mismatch detection. A disclosure must bind an
+external target and an interaction action together within one sentence; isolated
+words such as `API`, `web`, `network`, `remote`, `URL`, or `endpoint` are
+insufficient, and a named service counts only when it is worded as the target of
+the interaction rather than as data or configuration. Explicit offline/no-network
 wording is a contradiction when egress is reachable. When a literal URL is
 available, ScopeCheck records its host and compares a small set of named services
 such as GitHub with that host. The matched or failed disclosure reason is retained
