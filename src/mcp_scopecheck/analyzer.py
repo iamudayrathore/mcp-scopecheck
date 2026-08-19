@@ -313,13 +313,29 @@ class _NetworkDestinations:
     unresolved: bool = False
 
 
-def _is_local_host(host: str) -> bool:
-    """True only for the localhost name and genuine loopback/private IP literals.
+_LOCAL_NETWORKS = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in (
+        "127.0.0.0/8",  # loopback
+        "10.0.0.0/8",  # RFC1918
+        "172.16.0.0/12",  # RFC1918
+        "192.168.0.0/16",  # RFC1918
+        "::1/128",  # IPv6 loopback
+        "fc00::/7",  # IPv6 unique-local
+    )
+)
 
-    Parses the host as an IP address so that a hostname merely resembling a private
-    range ("10.example.com", "127.0.0.1.evil.com") is treated as external, not
-    dropped. Link-local addresses (including the 169.254.169.254 cloud-metadata
-    endpoint) are deliberately NOT treated as local, so egress to them is flagged.
+
+def _is_local_host(host: str) -> bool:
+    """True only for the localhost name and genuine loopback/RFC1918/ULA IPs.
+
+    Parses the host as an IP address so a hostname merely resembling a private range
+    ("10.example.com", "127.0.0.1.evil.com") is treated as external, not dropped.
+    Only loopback, RFC1918, and IPv6 unique-local addresses count as local; every
+    other address — link-local (including 169.254.169.254 cloud metadata),
+    benchmarking, test-net, reserved, and all globally routable hosts — is external
+    and flagged, so local/loopback is the one exemption and nothing routable slips
+    through it.
     """
 
     name = host.lower().strip(".")
@@ -335,7 +351,7 @@ def _is_local_host(host: str) -> bool:
     mapped = getattr(address, "ipv4_mapped", None)
     if mapped is not None:
         address = mapped
-    return address.is_loopback or (address.is_private and not address.is_link_local)
+    return any(address in network for network in _LOCAL_NETWORKS)
 
 
 def _poisoning_indicator(description: str) -> _DescriptionIndicator | None:
@@ -388,7 +404,8 @@ _UNTRUSTED_SERVICE_HOSTS = (
     "script.google.com",
     "sites.google.com",
     "docs.google.com",
-    "forms.gle",
+    "drive.google.com",
+    "chat.googleapis.com",
     "gist.github.com",
     "hooks.slack.com",
 )
@@ -405,7 +422,7 @@ def _host_matches_service(host: str, service: str) -> bool:
     """True when a reachable host's registrable domain belongs to a named service
     and the host is not a user-content/webhook endpoint that anyone can target."""
 
-    host = host.lower()
+    host = host.lower().strip(".")
     if any(host == deny or host.endswith(f".{deny}") for deny in _UNTRUSTED_SERVICE_HOSTS):
         return False
     return _registrable_domain(host) in _SERVICE_DOMAINS.get(service, frozenset())

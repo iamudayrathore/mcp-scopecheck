@@ -128,7 +128,9 @@ v0.2 intentionally supports:
 - Explicit module-level `httpx`, `requests`, and `requests.api` request functions,
   `urllib.request.urlopen`/`urlretrieve`, `socket.create_connection`, and request
   methods on flow-proven `httpx.Client`, `httpx.AsyncClient`, `requests.Session`,
-  and `requests.sessions.Session` values
+  `requests.sessions.Session`, `aiohttp.ClientSession`, `urllib3.PoolManager`,
+  `urllib3.HTTPConnectionPool`, `http.client.HTTP(S)Connection`, and `socket.socket`
+  values
 - Qualified builtin, `pathlib`, `os`, and `shutil` filesystem operations with
   static open-mode/flag handling
 
@@ -139,8 +141,9 @@ It does **not** prove:
 - Dynamic or wildcard import resolution, installed-package behavior, or more
   than one explicit package re-export hop
 - Runtime-only tool registration
-- `httpx.stream` or `aiohttp.request` context-manager factories, `http.client`
-  connection methods, or raw-socket instance traffic
+- `httpx.stream` or `aiohttp.request` context-manager factories, or egress via
+  clients outside the recognized set (for example `pycurl`, `smtplib`, `ftplib`,
+  `websockets`)
 - TypeScript/JavaScript behavior
 - Authorization correctness
 - Whether all observed data actually leaves the process, except the narrow same-function flow implemented by `MSC105`

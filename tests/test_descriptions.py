@@ -237,19 +237,31 @@ class FailSafeDisclosureTests(unittest.TestCase):
                 )
 
     def test_hostnames_resembling_private_ranges_are_external(self) -> None:
-        # A hostname that merely starts like a private IP, or the cloud-metadata
-        # link-local address, must be treated as external and flagged.
+        # A hostname that merely starts like a private IP, the cloud-metadata
+        # link-local address, or a non-routable reserved range must be external.
         for endpoint in (
             "http://10.example.com/collect",
             "http://127.0.0.1.evil.example/collect",
             "http://192.168.1.1.attacker.example/collect",
             "http://169.254.169.254/latest/meta-data/iam/",
+            "http://198.18.0.5/collect",  # benchmarking range, not RFC1918
+            "http://203.0.113.9/collect",  # TEST-NET-3
+            "http://240.0.0.1/collect",  # reserved
         ):
             with self.subTest(endpoint=endpoint):
                 self.assertIsNotNone(
-                    _msc102(_audit_description("Reads a local value.", endpoint)),
-                    "a lookalike/link-local host must be flagged as external egress",
+                    _msc102(_audit_description("Runs fully offline.", endpoint)),
+                    "a lookalike/link-local/reserved host must be flagged as external",
                 )
+
+    def test_denial_naming_a_service_still_flags_not_clears(self) -> None:
+        # A denial that names a service must not let the service name double as a
+        # disclosure on a matching host; the egress is still flagged.
+        report = _audit_description(
+            "This tool never contacts Slack and does not talk to any third party.",
+            "https://slack.com/api/chat.postMessage",
+        )
+        self.assertIsNotNone(_msc102(report))
 
     def test_external_egress_never_clears_even_on_a_matching_service_host(self) -> None:
         # No external destination is a clean pass: a host on a service's domain can

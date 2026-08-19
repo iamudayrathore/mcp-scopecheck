@@ -152,10 +152,13 @@ never *suppress* the finding. Free-text descriptions are an adversarial surface:
 malicious author can always word around a suppression heuristic, so MSC102 trusts
 only verifiable evidence and flags anything it cannot confirm.
 
-MSC102 does not fire only when the reachable egress targets purely local or
-loopback destinations (`localhost`, `127.0.0.1`, RFC1918/ULA ranges — IP literals
-are parsed with the `ipaddress` module so a hostname that merely resembles a
-private range stays external). Every resolved external host is flagged, even when
+MSC102 fires on reachable egress unless it targets purely local or loopback
+destinations. The sole exemption is `localhost` and loopback/RFC1918/ULA IP
+literals (`127.0.0.1`, `10/8`, `172.16/12`, `192.168/16`, `::1`, `fc00::/7`),
+parsed with the `ipaddress` module so a hostname that merely resembles a private
+range stays external and non-routable ranges (link-local/metadata, benchmarking,
+test-net, reserved) are treated as external. Every resolved external host is
+flagged, even when
 its registrable domain matches a service the description names: GitHub, GitLab, and
 Google serve attacker-controllable content (repos, gists, snippets, buckets,
 webhooks) on the same hosts as their APIs, so a host match cannot prove the
@@ -209,17 +212,21 @@ write and deliberately does not create a read-only/write contradiction.
 Network capability evidence uses a case-sensitive allowlist rather than module
 prefixes. Supported direct sinks are the standard request verbs and `request`
 functions on `httpx`, `requests`, and `requests.api`, `urllib.request.urlopen`,
-`urllib.request.urlretrieve`, and `socket.create_connection`. Supported request
+`urllib.request.urlretrieve`, and `socket.create_connection`. Supported instance
 methods on flow-proven `httpx.Client`, `httpx.AsyncClient`, `requests.Session`,
-and `requests.sessions.Session` instances are also sinks. Constructors,
-request/configuration objects, local utilities, and unknown calls beneath a
-network-related module are not egress evidence.
+`requests.sessions.Session`, `aiohttp.ClientSession`, `urllib3.PoolManager`,
+`urllib3.HTTPConnectionPool`, `http.client.HTTPConnection`,
+`http.client.HTTPSConnection`, and `socket.socket` values are also sinks (for
+`http.client` and raw sockets the request/connect/send methods; `bind`/`listen`/
+`accept`/`recv` are not egress). Constructors, request/configuration objects,
+local utilities, and unknown calls beneath a network-related module are not egress
+evidence.
 
 The context-manager factories `httpx.stream` and `aiohttp.request` are not
-classified in v0.2 because a bare factory call does not complete network I/O
-and the analyzer does not yet prove their context entry. `http.client`
-connection methods and raw-socket instance operations are likewise unmodeled;
-they are not guessed from method names. Proven instance methods require a known
+classified in v0.2 because a bare factory call does not complete network I/O and
+the analyzer does not yet prove their context entry. Egress through clients
+outside the recognized set (`pycurl`, `smtplib`, `ftplib`, `websockets`, DNS
+resolvers) is likewise unmodeled. Proven instance methods require a known
 supported constructor binding that remains live at that statement.
 
 `MSC103` tracks exact path-like parameter names and common suffixes such as
