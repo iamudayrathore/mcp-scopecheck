@@ -10,3 +10,6 @@ build/
 dist/
 .env
 .DS_Store
+
+# Private maintenance handoffs must never be committed or packaged.
+CODEX_*.md

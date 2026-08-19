@@ -13,6 +13,7 @@ from .analyzer import (
     analyze_capabilities,
     analyze_contract,
     analyze_reachability,
+    path_sink_parameters,
 )
 from .models import (
     AnalysisCompleteness,
@@ -187,18 +188,37 @@ def audit(target: str | Path) -> AuditReport:
     unresolved_edges = unresolved_edges[:MAX_UNRESOLVED_LOCAL_EDGES]
     notifications = []
     tools_by_name = {tool.name: tool for tool in project.tools}
+    # Notify when a tool's unresolved work could hide filesystem-scope evidence.
+    # Two disjoint cases qualify, and both are needed:
+    #   1. A parameter is proven to reach an unguarded filesystem sink. This is
+    #      exactly the condition under which `analyze_contract` withholds MSC103,
+    #      and it is name-independent, so it now covers `filepath`/`target`/`name`.
+    #   2. The tool declares a path-like parameter but no sink was proven, because
+    #      the lineage itself runs through the unresolved call. Naming is the only
+    #      signal left when the flow cannot be followed, so it is retained here as
+    #      a fallback rather than as the primary gate.
+    # A tool with neither has no filesystem-scope inference to report on; its
+    # unresolved edges are already listed in the ledger above.
+    path_relevant: dict[str, bool] = {}
     for edge in unresolved_edges:
         unresolved_tool = tools_by_name.get(edge.tool_name)
-        if unresolved_tool is None or not any(
-            _is_path_parameter_name(parameter.name)
-            for parameter in unresolved_tool.parameters
-        ):
+        if unresolved_tool is None:
+            continue
+        relevant = path_relevant.get(unresolved_tool.key)
+        if relevant is None:
+            relevant = bool(path_sink_parameters(project, unresolved_tool)) or any(
+                _is_path_parameter_name(parameter.name)
+                for parameter in unresolved_tool.parameters
+            )
+            path_relevant[unresolved_tool.key] = relevant
+        if not relevant:
             continue
         notifications.append(
             AnalysisNotification(
                 "MSC103-GUARD-UNKNOWN",
-                "MSC103 was not inferred across unresolved path lineage for tool "
-                f"{unresolved_tool.name!r}",
+                "MSC103 filesystem-scope inference may be incomplete for tool "
+                f"{unresolved_tool.name!r}: an unresolved reachable call could "
+                "carry guard state",
                 edge.source_file,
                 edge.line_number,
             )

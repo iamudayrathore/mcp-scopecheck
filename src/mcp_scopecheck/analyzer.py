@@ -290,6 +290,39 @@ MAX_CAPABILITY_PATHS_PER_TOOL = 1_000
 class _DescriptionIndicator:
     family: str
     excerpt: str
+    severity: Severity
+
+
+# Severity is per indicator family, because the families differ in how strongly the
+# match implies an instruction aimed at the host model rather than a description of
+# the tool's own behavior.
+#
+# CRITICAL families match a directive that has no legitimate reading in a tool
+# description: overriding prior instructions, concealing activity from the user,
+# acting covertly, impersonating a privileged role, or embedding a control token.
+#
+# HIGH families match wording that is frequently, but not exclusively, malicious:
+#
+# * `credential-handling instruction` matches a verb near a credential noun. A tool
+#   that legitimately manages secrets describes itself that way ("Read credentials
+#   from the configured system keychain entry"), so the match is evidence worth a
+#   human decision rather than proof of poisoning.
+# * `cross-call instruction` matches sequencing wording ("before any request"),
+#   which is also how an ordinary tool documents a prerequisite.
+#
+# Reporting these at CRITICAL made honest credential, authentication, and workflow
+# tools indistinguishable from poisoned ones. Detection is unchanged; only the
+# severity assigned to an ambiguous family moved.
+_INDICATOR_SEVERITIES: dict[str, Severity] = {
+    "covert sensitive-data transfer": Severity.CRITICAL,
+    "concealment instruction": Severity.CRITICAL,
+    "hidden action": Severity.CRITICAL,
+    "hidden-token marker": Severity.CRITICAL,
+    "instruction override": Severity.CRITICAL,
+    "privileged-role impersonation": Severity.CRITICAL,
+    "credential-handling instruction": Severity.HIGH,
+    "cross-call instruction": Severity.HIGH,
+}
 
 
 @dataclass(frozen=True)
@@ -357,7 +390,11 @@ def _is_local_host(host: str) -> bool:
 def _poisoning_indicator(description: str) -> _DescriptionIndicator | None:
     normalized = " ".join(description.split())
     matches = [
-        _DescriptionIndicator(label, match.group(0))
+        _DescriptionIndicator(
+            label,
+            match.group(0),
+            _INDICATOR_SEVERITIES.get(label, Severity.CRITICAL),
+        )
         for pattern, label in POISONING_PATTERNS
         if (match := pattern.search(normalized)) is not None
     ]
@@ -374,7 +411,10 @@ def _poisoning_indicator(description: str) -> _DescriptionIndicator | None:
         & {match.family for match in matches}
     ):
         return None
-    return matches[0]
+    # Report the strongest family a description matches, not the first pattern in
+    # declaration order, so an unambiguous directive is never downgraded because it
+    # also happens to mention a credential.
+    return max(matches, key=lambda match: int(match.severity))
 
 
 # Public registrable domains for each named service. A host match here NEVER clears
@@ -732,6 +772,14 @@ def _resolve_local_call(
 ) -> _LocalCallResolution:
     if isinstance(call.func, ast.Name):
         name = call.func.id
+        # A locally defined class shadows into the module alias table with an empty
+        # target, so it must be recognized before the alias lookup below; otherwise
+        # constructing it is misreported as a higher-order call through a variable.
+        if (record.source_file, name) in project.classes:
+            return _LocalCallResolution(
+                reason=UnresolvedReason.UNSUPPORTED_INSTANCE_DISPATCH,
+                candidate=name,
+            )
         if name not in imports:
             target = project.functions.get((record.source_file, name))
             if target is not None:
@@ -2220,6 +2268,61 @@ def _path_scope_result(
     return result
 
 
+def _expression_identifiers(expression: str) -> frozenset[str]:
+    """Identifiers named anywhere in an unparsed call expression."""
+
+    try:
+        parsed = ast.parse(expression, mode="eval")
+    except SyntaxError:
+        return frozenset()
+    return frozenset(
+        node.id for node in ast.walk(parsed) if isinstance(node, ast.Name)
+    )
+
+
+def _guard_may_be_unresolved(
+    sources: frozenset[str],
+    unresolved_edges: Iterable[UnresolvedCallEdge],
+) -> bool:
+    """Whether unresolved work could own the guard for a path reaching a sink.
+
+    Only two shapes can retroactively constrain a value that the analyzer already
+    proved flows unguarded into a filesystem call:
+
+    * decorator/wrapper indirection, because a wrapper observes every argument and
+      can reject the call before the tool body runs; and
+    * an unresolved call that actually receives the path value, because that callee
+      may validate or raise on it.
+
+    An unresolved call that never sees the value - a dynamic import of an unrelated
+    plugin, an instance dispatch on other data - cannot make an unguarded sink safe,
+    so it must not silence the finding. Before v0.2.1 any unresolved edge anywhere in
+    the tool suppressed MSC103, which let unrelated indirection hide a traversal.
+    """
+
+    for edge in unresolved_edges:
+        if edge.reason is UnresolvedReason.WRAPPER_INDIRECTION:
+            return True
+        if sources & _expression_identifiers(edge.call_expression):
+            return True
+    return False
+
+
+def path_sink_parameters(project: ParsedProject, tool: ToolDefinition) -> set[str]:
+    """Tool parameters proven to reach an unguarded filesystem sink.
+
+    Mirrors the seeding used by `analyze_contract` so completeness reporting and
+    `MSC103` agree on which parameters actually participate in filesystem access.
+    """
+
+    result = _path_scope_result(
+        project,
+        tool,
+        {parameter.name for parameter in tool.parameters},
+    )
+    return {source for sink in result.sinks for source in sink.sources}
+
+
 def _reads_environment(node: ast.AST, execution: _ExecutionResult) -> bool:
     return any(
         (
@@ -2410,7 +2513,7 @@ def analyze_contract(
             _finding(
                 "MSC001",
                 "Agent-directed instruction in tool description",
-                Severity.CRITICAL,
+                indicator.severity,
                 tool,
                 f"The tool description contains a {indicator.family}: "
                 f"{indicator.excerpt!r}.",
@@ -2530,22 +2633,33 @@ def analyze_contract(
                 )
             )
 
-    path_parameters = {
-        parameter.name
-        for parameter in tool.parameters
-        if _is_path_parameter_name(parameter.name)
-    }
+    # Seed path tracking from every declared parameter and let the flow analysis
+    # decide. `_sink_value` only reads path positions (the receiver, argument 0,
+    # argument 1 of a two-path call, and the file/filename/path/src/dst keywords),
+    # so a non-path parameter becomes a sink source only when it genuinely occupies
+    # a path position. Parameter naming is a ranking hint, never the gate: a
+    # traversal through `filepath`, `target`, or `name` is the same defect as one
+    # through `path`.
+    path_parameters = {parameter.name for parameter in tool.parameters}
     records = reachable_functions(project, tool)
     path_scope = _path_scope_result(project, tool, path_parameters)
-    path_guard_state_unresolved = bool(path_parameters) and any(unresolved_edges)
-    if path_scope.sinks and not path_guard_state_unresolved:
+    # Suppression is scoped per sink: a sink is withheld only when unresolved work
+    # could actually own its guard. Sinks whose lineage is fully proven are still
+    # reported even if the tool contains unrelated unresolved calls.
+    unresolved_list = list(unresolved_edges)
+    reportable_sinks = [
+        sink
+        for sink in path_scope.sinks
+        if not _guard_may_be_unresolved(sink.sources, unresolved_list)
+    ]
+    if reportable_sinks:
         unguarded_parameters = sorted(
             source
-            for sink in path_scope.sinks
+            for sink in reportable_sinks
             for source in sink.sources
         )
         evidence = max(
-            path_scope.sinks,
+            reportable_sinks,
             key=lambda sink: (
                 sink.evidence.source_file,
                 sink.evidence.line_number,
@@ -2592,8 +2706,18 @@ def analyze_contract(
         if tool_record is not None
         else {}
     )
+    # A path-like name still qualifies on its own, because a dangerous root default
+    # is a contract defect even when the parameter is only forwarded. Proven
+    # filesystem participation qualifies a differently named parameter. Naming is
+    # deliberately NOT widened here: a bare `sep: str = "/"` or `prefix: str = "/"`
+    # that never reaches a filesystem sink is not a dangerous filesystem default.
+    sink_sources = {source for sink in path_scope.sinks for source in sink.sources}
     for parameter in tool.parameters:
-        if not _is_path_parameter_name(parameter.name):
+        if not (
+            _is_path_parameter_name(parameter.name)
+            or parameter.name in sink_sources
+            or parameter.name in path_scope.expanded_sources
+        ):
             continue
         default_node = default_nodes.get(parameter.name)
         if default_node is None or tool_record is None:
@@ -2614,7 +2738,12 @@ def analyze_contract(
                     "expanding access beyond a project root.",
                     "Remove the caller-controlled root and bind access to a fixed "
                     "application directory.",
-                    description_evidence,
+                    Evidence(
+                        tool.source_file,
+                        _line_number(default_node),
+                        f"{parameter.name} default",
+                        f"{parameter.name}={parameter.default}",
+                    ),
                 )
             )
 

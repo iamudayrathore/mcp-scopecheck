@@ -57,7 +57,7 @@ Findings (6)
     Fix:      Resolve the candidate path and prove it remains beneath a fixed, trusted root before access.
   [HIGH] MSC104 Dangerous filesystem default
     Tool:     search_project_docs
-    Evidence: server.py:23 (tool description)
+    Evidence: server.py:23 (root default)
     Why:      Parameter 'root' defaults to '/', expanding access beyond a project root.
     Fix:      Remove the caller-controlled root and bind access to a fixed application directory.
 

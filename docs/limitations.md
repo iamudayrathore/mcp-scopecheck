@@ -42,9 +42,21 @@ statically recognizable:
 
 Cross-module capability facts can inform `MSC101`, `MSC102`, `MSC106`, `MSC107`,
 and `MSC108`. `MSC103` requires supported argument lineage and recognized guard
-state across the path; otherwise the inference is suppressed and incompleteness
-is reported. `MSC105` remains same-function. v0.2.0 does not implement
+state across the path. Suppression is per sink and applies only when unresolved
+work could own that sink's guard: wrapper/decorator indirection, or an unresolved
+call that actually receives the path value. Unrelated unresolved calls elsewhere
+in the tool no longer suppress the rule, and incompleteness is still reported. `MSC105` remains same-function. v0.2.0 does not implement
 cross-module environment-to-network taint or general interprocedural data flow.
+
+`MSC001` matches deterministic wording families, and those families differ in
+precision. Unambiguous directive families are Critical. The `credential-handling
+instruction` and `cross-call instruction` families are High because the same
+wording appears in honest descriptions of credential, authentication, and
+workflow tools. The `concealment instruction` family is Critical but can fire on a
+prohibition phrased as a safety guarantee. `MSC001` has not been benchmarked for
+precision or recall against a large corpus of real tool descriptions; the bundled
+corpus is a regression fixture. A lone `MSC001` finding warrants reading the
+description, not an automatic rejection.
 
 Capabilities are evidence, not automatic vulnerabilities. ScopeCheck does not
 prove authorization correctness, SSRF safety, SQL safety, shell safety, symlink
