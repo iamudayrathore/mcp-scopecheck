@@ -119,6 +119,13 @@ NETWORK_CLIENT_CONSTRUCTORS = {
         {"connect", "request", "putrequest", "send", "endheaders"}
     ),
     "socket.socket": frozenset({"connect", "connect_ex", "sendall", "sendto"}),
+    "aiohttp.ClientSession": frozenset(
+        {"delete", "get", "head", "options", "patch", "post", "put", "request", "ws_connect"}
+    ),
+    "urllib3.PoolManager": frozenset(
+        {"request", "urlopen", "request_encode_url", "request_encode_body"}
+    ),
+    "urllib3.HTTPConnectionPool": frozenset({"request", "urlopen"}),
 }
 PROCESS_PREFIXES = ("asyncio.create_subprocess_", "subprocess.")
 PROCESS_CALLS = {"os.popen", "os.system"}
@@ -323,6 +330,11 @@ def _is_local_host(host: str) -> bool:
         address = ipaddress.ip_address(candidate)
     except ValueError:
         return False
+    # Unwrap IPv4-mapped IPv6 (::ffff:a.b.c.d) so an external mapped address is not
+    # read as private on CPython versions that classified the whole block private.
+    mapped = getattr(address, "ipv4_mapped", None)
+    if mapped is not None:
+        address = mapped
     return address.is_loopback or (address.is_private and not address.is_link_local)
 
 
@@ -458,35 +470,31 @@ def _assess_network_disclosure(
     )
 
     if external:
-        unaccounted = [
+        # A resolved external host is never cleared, even when its registrable
+        # domain matches a named service: GitHub, GitLab, and Google serve
+        # attacker-controllable content (repos, gists, snippets, buckets, webhooks)
+        # on the same hosts as their APIs, so a host match cannot prove the specific
+        # destination is the disclosed one. The service comparison is used only to
+        # choose the more informative subtype when a named service is contradicted.
+        unmatched = [
             host
             for host in external
             if not any(_host_matches_service(host, service) for service in described)
         ]
-        if unaccounted:
-            if described:
-                return _DisclosureAssessment(
-                    False,
-                    f"described destination {described!r} does not match "
-                    f"static host(s) {unaccounted!r}",
-                )
+        if described and unmatched:
             return _DisclosureAssessment(
                 False,
-                f"a specific external host {unaccounted!r} is reachable but the "
-                "description names no matching destination",
+                f"described destination {described!r} does not match "
+                f"static host(s) {unmatched!r}",
             )
-        # Every resolved external host is named. Only clean if nothing else is
-        # left unresolved.
-        if destinations.unresolved:
-            return _DisclosureAssessment(
-                False,
-                "a further reachable network destination is not statically "
-                "resolvable and is not disclosed",
-            )
-        return _DisclosureAssessment(True, "description names the reachable destination(s)")
+        return _DisclosureAssessment(
+            False,
+            f"reachable external host(s) {list(external)!r} are not verifiably "
+            "disclosed",
+        )
 
-    # Reached only when there is no external host but a dynamic/computed destination
-    # remains. It cannot be verified, so it is flagged, never suppressed by prose.
+    # No external host resolved, but a dynamic/computed destination remains. It
+    # cannot be verified, so it is flagged, never suppressed by prose.
     return _DisclosureAssessment(
         False,
         "the reachable network destination is not statically resolvable and is "

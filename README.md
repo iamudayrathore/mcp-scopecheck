@@ -89,7 +89,7 @@ side effect in a fixture and proves it does not execute during an audit.
 | --- | --- | --- |
 | `MSC001` | Critical | Deterministic indicator families find agent-directed override, concealment, covert transfer, or related high-risk wording |
 | `MSC101` | High/Critical | `readOnlyHint=true` conflicts with justified state-changing behavior; process and dynamic code conflicts are Critical |
-| `MSC102` | High | Reachable network egress whose destination is not verifiably disclosed: a dynamic/unresolved destination, a resolved external host the description does not name, a named service that mismatches the reachable host, or an explicit no-network denial. Prose never suppresses it |
+| `MSC102` | High | Reachable network egress whose destination is not verifiably disclosed. Every external destination is flagged (a host match to a named service is not proof — services host attacker content on their own hosts); only local/loopback egress is exempt. Prose never suppresses it |
 | `MSC103` | High | A correlated path-like input reaches a filesystem operation without a recognized guard on that value |
 | `MSC104` | High | A path/root parameter defaults to the POSIX root or to an exact home root that code actually expands |
 | `MSC105` | Critical | Environment-derived data reaches a supported module or proven client-instance network sink in the same reachable function |

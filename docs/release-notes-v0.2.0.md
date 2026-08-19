@@ -77,16 +77,19 @@ return clean exit `0`, and four repositories gained meaningful cross-module
 capability visibility.
 
 On this corpus v0.2.0 reports the six confirmed process-execution detections
-(`MSC106`) plus ten `MSC102` network-egress flags — all ten reachable-egress
-tools in the corpus (eight in one Google Workspace server, two in a YouTube
-server). Every one builds its request URL through a client library or an
-interpolated string, so the destination is not a plain string literal ScopeCheck's
-endpoint extractor can read, and the tool is flagged for review
-rather than trusted. `MSC102` cannot be suppressed by a tool's prose by design;
-the ten flags are the deliberate recall-over-precision consequence of that choice,
-not missed egress. None is a false negative: each names a genuinely reachable
-network call whose destination ScopeCheck cannot verify. These are curated-corpus
-observations, not ecosystem-wide precision or recall claims.
+(`MSC106`) plus eleven `MSC102` network-egress flags — every reachable-egress tool
+in the corpus (eight in a Google Workspace server, two in a YouTube server, and one
+`aiohttp` documentation lookup in a Redis server). Each builds its request URL
+through a client library or an interpolated string, so the destination is not a
+plain string literal ScopeCheck's endpoint extractor can read, and the tool is
+flagged for review rather than trusted. `MSC102` cannot be suppressed by a tool's
+prose by design, and no reachable external destination is treated as a clean pass
+even when the description names a matching service — a service host can serve
+attacker-controlled content indistinguishable by hostname. The eleven flags are
+the deliberate recall-over-precision consequence of that choice, not missed egress;
+each names a genuinely reachable network call whose destination ScopeCheck cannot
+verify. These are curated-corpus observations, not ecosystem-wide precision or
+recall claims.
 
 ## Compatibility and limits
 

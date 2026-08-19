@@ -15,19 +15,20 @@
 - Kept `MSC105` same-function and suppressed `MSC103` when cross-boundary
   argument or guard lineage is unresolved.
 - Reworked `MSC102` network-egress disclosure so a tool's prose can never
-  suppress the finding — only verifiable evidence can. Reachable egress is always
-  reported as an observed capability, and MSC102 treats it as undisclosed unless
-  the reachable destination is a statically resolved external host whose
-  registrable domain matches a service the description names (compared against a
-  first-party allowlist, so a typosquat, subdomain-prefix, or user-content host
-  does not match, and one matching host never clears another). A dynamic or
-  computed destination that cannot be resolved statically is always flagged for
-  review, never vouched for by wording. Purely local/loopback destinations
-  (`localhost`, `127.0.0.1`, RFC1918/ULA) are not treated as external egress. An
-  explicit offline/no-network denial is reported as a contradiction; denial
-  detection is best-effort, because a missed denial still flags rather than
-  suppresses. This is a deliberate recall-over-precision stance: a reachable call
-  whose destination cannot be verified is surfaced for a human to confirm.
+  suppress the finding, and no reachable external destination is treated as a clean
+  pass. Reachable egress is always reported as an observed capability. MSC102 flags
+  it unless it targets only local/loopback hosts (`localhost`, `127.0.0.1`,
+  RFC1918/ULA, IP literals parsed with the `ipaddress` module so lookalike
+  hostnames stay external). A resolved external host is flagged even when its
+  registrable domain matches a service the description names, because services host
+  attacker-controllable content (repos, gists, snippets, buckets, webhooks) on the
+  same hosts as their APIs; the service comparison is used only to choose a
+  destination-mismatch subtype. A dynamic or computed destination is always flagged
+  for review. An explicit offline/no-network denial is reported as a contradiction
+  (best-effort — a missed denial still flags). Egress detection now includes
+  `http.client`, raw sockets, `aiohttp.ClientSession`, and `urllib3` pools. This is
+  a deliberate recall-over-precision stance: every reachable network call whose
+  destination cannot be verified is surfaced for a human to confirm.
 - Added deterministic SARIF 2.1.0 output with findings as results and
   incompleteness as non-finding tool execution notifications.
 - Added explicit graph, path, unresolved-edge, and potential-registration

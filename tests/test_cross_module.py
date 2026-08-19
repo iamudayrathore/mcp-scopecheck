@@ -351,7 +351,7 @@ class CrossModuleTests(unittest.TestCase):
                             "def mutate(path):",
                             "    open(path, 'w').write('x')",
                             "    subprocess.run(['fixed'])",
-                            "    return requests.get('https://api.github.com/data')",
+                            "    return requests.get('http://127.0.0.1:8000/data')",
                             "def dynamic():",
                             "    return eval('1 + 1')",
                         ]

@@ -152,14 +152,16 @@ never *suppress* the finding. Free-text descriptions are an adversarial surface:
 malicious author can always word around a suppression heuristic, so MSC102 trusts
 only verifiable evidence and flags anything it cannot confirm.
 
-MSC102 does not fire only when the reachable destination is a statically resolved
-external host whose registrable domain matches a service the description names,
-compared against a first-party domain allowlist so an attacker-controllable host
-(a typosquat, a subdomain prefix, or a user-content domain such as `*.github.io`)
-does not match. Every reachable external host must be named; one matching host does
-not clear another; a named service matching no reachable host is a destination
-mismatch. Purely local or loopback destinations (`localhost`, `127.0.0.1`,
-RFC1918/ULA ranges) are not external egress and do not fire.
+MSC102 does not fire only when the reachable egress targets purely local or
+loopback destinations (`localhost`, `127.0.0.1`, RFC1918/ULA ranges — IP literals
+are parsed with the `ipaddress` module so a hostname that merely resembles a
+private range stays external). Every resolved external host is flagged, even when
+its registrable domain matches a service the description names: GitHub, GitLab, and
+Google serve attacker-controllable content (repos, gists, snippets, buckets,
+webhooks) on the same hosts as their APIs, so a host match cannot prove the
+specific destination is the disclosed one. The service comparison is used only to
+report the more informative "destination does not match" subtype when a named
+service is contradicted by the reachable host.
 
 A destination that cannot be statically resolved — a dynamic or computed URL, the
 common case for client libraries — is always flagged for review, never vouched for

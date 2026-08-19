@@ -140,17 +140,17 @@ class DescriptionContractTests(unittest.TestCase):
                 self.assertIn("contradicts", finding.title)
                 self.assertIn("explicit denial", finding.message)
 
-    def test_clear_external_github_disclosure_matches_static_destination(self) -> None:
+    def test_external_host_on_a_named_service_domain_still_flags(self) -> None:
+        # A host match is not proof of disclosure: services host attacker content on
+        # their own domains, so even api.github.com with "GitHub" named must flag.
         report = _audit_description(
             "Queries the external GitHub API with the supplied repository name.",
             "https://api.github.com/repos/openai/openai-python",
         )
-
-        self.assertIsNone(_msc102(report))
-        tool = report.tools[0]
-        network = report.capabilities[tool.key][0]
-        self.assertIn("static destination", network.evidence.detail)
-        self.assertIn("names the reachable destination", network.evidence.detail)
+        finding = _msc102(report)
+        self.assertIsNotNone(finding)
+        assert finding is not None
+        self.assertIn("not disclosed", finding.title)
 
     def test_named_destination_must_match_a_static_host(self) -> None:
         report = _audit_description(
@@ -251,24 +251,24 @@ class FailSafeDisclosureTests(unittest.TestCase):
                     "a lookalike/link-local host must be flagged as external egress",
                 )
 
-    def test_named_destination_that_matches_reachable_host_is_clean(self) -> None:
+    def test_external_egress_never_clears_even_on_a_matching_service_host(self) -> None:
+        # No external destination is a clean pass: a host on a service's domain can
+        # be an attacker-controlled bucket/gist/snippet/webhook indistinguishable by
+        # host, so naming the service never suppresses the finding.
         cases = (
-            (
-                "Queries the external GitHub API with the supplied repository name.",
-                "https://api.github.com/repos/example/example",
-            ),
-            (
-                "Send a message through the Slack API.",
-                "https://slack.com/api/chat.postMessage",
-            ),
-            (
-                "Imports the supplied file into a Google Drive folder.",
-                "https://www.googleapis.com/upload/drive/v3/files",
-            ),
+            "https://api.github.com/repos/example/example",
+            "https://slack.com/api/chat.postMessage",
+            "https://www.googleapis.com/upload/drive/v3/files",
+            "https://github.com/attacker/drop/raw/main/x",
+            "https://gitlab.com/-/snippets/999/raw",
         )
-        for description, endpoint in cases:
-            with self.subTest(description=description):
-                self.assertIsNone(_msc102(_audit_description(description, endpoint)))
+        for endpoint in cases:
+            with self.subTest(endpoint=endpoint):
+                report = _audit_description(
+                    "Interacts with the configured GitHub, Slack, and Google services.",
+                    endpoint,
+                )
+                self.assertIsNotNone(_msc102(report))
 
     def test_user_content_and_webhook_hosts_never_vouch_for_egress(self) -> None:
         # Hosts on a first-party domain that serve arbitrary user content (buckets,
@@ -480,10 +480,11 @@ class FailSafeDisclosureTests(unittest.TestCase):
         assert contradiction is not None
         self.assertIn("contradicts", contradiction.title)
 
-    def test_egress_is_observed_on_clean_disclosures(self) -> None:
-        # A clean verdict is only meaningful if egress was actually reachable.
+    def test_egress_is_observed_on_local_only_clean_case(self) -> None:
+        # The one clean case with reachable egress is local/loopback-only; the
+        # capability is still observed, which keeps the clean verdict meaningful.
         report = _audit_description(
-            "Queries the GitHub API.", "https://api.github.com/repos/x/y"
+            "Queries a local model server.", "http://127.0.0.1:11434/api"
         )
         self.assertIsNone(_msc102(report))
         capabilities = {
