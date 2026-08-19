@@ -156,6 +156,13 @@ class DescriptionContractTests(unittest.TestCase):
         self.assertNotIn("not disclosed", finding.title.lower())
         # The observed static destination is retained in the finding evidence.
         self.assertIn("api.github.com", finding.evidence.detail)
+        # Remediation must not promise that stating/documenting the destination
+        # clears MSC102; it directs the reviewer to verify/approve or constrain.
+        remediation = finding.remediation
+        self.assertIn("Verify and approve the destination and data purpose", remediation)
+        self.assertIn("constrain", remediation.lower())
+        self.assertNotIn("state the destination", remediation.lower())
+        self.assertNotIn("document", remediation.lower())
 
     def test_named_destination_must_match_a_static_host(self) -> None:
         report = _audit_description(

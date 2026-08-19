@@ -129,9 +129,10 @@ model, not under every possible Python execution.
 
 ## Finding philosophy
 
-Capabilities are facts about code structure; they are not automatically vulnerabilities. For example, filesystem read behavior is expected for a documentation search tool. Findings are emitted when:
+Capabilities are facts about code structure; they are not automatically vulnerabilities. For example, filesystem read behavior is expected for a documentation search tool. A finding is likewise not an automatically confirmed vulnerability. Findings are emitted when:
 
 - a declared claim conflicts with an observed capability;
+- modeled reachable external network egress requires human review;
 - sensitive behavior is undisclosed or insufficiently constrained; or
 - behavior is inherently high-risk in an agent-controlled tool boundary.
 

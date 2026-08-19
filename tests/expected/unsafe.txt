@@ -49,7 +49,7 @@ Findings (6)
     Tool:     search_project_docs
     Evidence: server.py:15 (httpx.post)
     Why:      A modeled reachable external network call was found. ScopeCheck does not treat description prose or a matching service hostname as proof of the intended destination.
-    Fix:      State the destination and data purpose, or remove network access.
+    Fix:      Verify and approve the destination and data purpose; constrain or remove network access if it is not intended.
   [HIGH] MSC103 Filesystem scope is not constrained
     Tool:     search_project_docs
     Evidence: server.py:31 (path.read_text)

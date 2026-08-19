@@ -252,8 +252,8 @@ _DENIAL_VERB = (
 # Generic terms ("url", "server", "endpoint"), bare service names, dotted module
 # paths ("os.path"), and filenames ("requirements.txt") are excluded so unrelated
 # negations are not misread as denials. A missed denial is not a safety problem
-# under this rule: it simply flags the egress as undisclosed instead of as a
-# contradiction.
+# under this rule: it simply falls through to the generic external-egress review
+# finding instead of the contradiction subtype.
 _DENIAL_TARGET = r"(?:internet|networks?|remote|external|outbound)"
 NETWORK_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
@@ -1585,8 +1585,8 @@ def _network_destinations(
     """Classify the reachable network egress destinations of a tool.
 
     Every reachable egress call whose destination is not a resolvable string
-    literal marks the result `unresolved`, so a dynamic/computed URL to an
-    undisclosed host is flagged rather than trusted.
+    literal marks the result `unresolved`, so a dynamic or computed destination is
+    flagged for review rather than trusted.
     """
 
     external: set[str] = set()
@@ -2518,7 +2518,8 @@ def analyze_contract(
                     Severity.HIGH,
                     tool,
                     message,
-                    "State the destination and data purpose, or remove network access.",
+                    "Verify and approve the destination and data purpose; constrain "
+                    "or remove network access if it is not intended.",
                     Evidence(
                         network_evidence.source_file,
                         network_evidence.line_number,
