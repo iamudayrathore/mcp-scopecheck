@@ -8,7 +8,8 @@ Mode: static source analysis (target code was not imported or executed)
   Surface:      1 MCP tool(s) discovered
   Scope:        1 declared parameter(s)
   Side effects: 2 reachable capability site(s)
-  Snapshot:     sha256:8fd69552ce3407ba3774eb5ad7cb4a613db3e5892413ee03d02a897ec51bd715
+  Completeness: complete
+  Snapshot:     sha256:a9fa635f7b0bc555cd7ef9b6563bb37c1458c4355007f787b175237c5ce370f2
 
 Tools
   search_project_docs (server.py:21)
@@ -16,8 +17,17 @@ Tools
     Parameters:  query
     Claims:      readOnlyHint=true
     Observed:    filesystem_read
+    Evidence:    filesystem_read: search_project_docs (server.py:21) -> _search_docs (server.py:11) -> DOCS_ROOT.glob (server.py:13)
+    Evidence:    filesystem_read: search_project_docs (server.py:21) -> _search_docs (server.py:11) -> path.read_text (server.py:14)
+
+Completeness (complete)
+  Registrations: 1 supported, 0 unresolved
+  Resolved reachable local call edges (1)
+    search_project_docs: search_project_docs -> _search_docs at server.py:24 [_search_docs(query); target server.py]
+  Unresolved reachable local call edges (0)
+    none
 
 Findings (0)
-  No contract mismatches or high-risk behavior detected by the v0.1 rules.
+  No contract mismatches or high-risk behavior detected by the v0.2 rules.
 
 Limit: a clean static scan is not proof of safe runtime behavior.

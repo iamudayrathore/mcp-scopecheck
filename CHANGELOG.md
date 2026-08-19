@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.2.0 - 2026-08-19
+
+- Added explicit `complete`, `partial`, and `failed` analysis states with exit
+  `2` precedence for incomplete analysis, including when supported findings are
+  also present.
+- Added deterministic ledgers for resolved and unresolved reachable local calls
+  plus statically visible unsupported registration forms.
+- Added bounded resolution for static in-root relative/absolute imports, direct
+  imported functions and aliases, qualified module calls, cycles, and one named
+  package re-export hop.
+- Propagated cross-module filesystem, environment, network, process, and dynamic
+  code capabilities with shortest explainable source paths.
+- Kept `MSC105` same-function and suppressed `MSC103` when cross-boundary
+  argument or guard lineage is unresolved.
+- Reworked `MSC102` into a conservative external-egress review rule. For modeled
+  network sinks, neither a tool's prose nor a matching service hostname suppresses
+  the finding, and no reachable external destination is treated as a clean pass.
+  Reachable egress is always reported as an observed capability. MSC102 flags it
+  unless it targets only local/loopback/private hosts (`localhost`, `127.0.0.1`,
+  RFC1918/ULA, IP literals parsed with the `ipaddress` module so lookalike
+  hostnames stay external). A resolved external host is flagged even when its
+  registrable domain matches a service the description names, because services host
+  attacker-controllable content (repos, gists, snippets, buckets, webhooks) on the
+  same hosts as their APIs; the service comparison is used only to choose the
+  destination-mismatch subtype. A dynamic or computed destination is always flagged
+  for review. An explicit offline/no-network denial is reported as a contradiction
+  (best-effort — a missed denial still flags). Modeled egress detection now includes
+  `http.client`, raw sockets, `aiohttp.ClientSession`, and `urllib3` pools; egress
+  through unmodeled clients is not detected. This is a deliberate
+  recall-over-precision stance: every modeled reachable external network call whose
+  destination cannot be verified is surfaced for a human to confirm. The generic
+  finding is titled `External network egress requires review`.
+- Added deterministic SARIF 2.1.0 output with findings as results and
+  incompleteness as non-finding tool execution notifications.
+- Added explicit graph, path, unresolved-edge, and potential-registration
+  resource limits that fail closed.
+- Preserved Python 3.11+, zero runtime dependencies, local-source-only analysis,
+  and the no-target-execution invariant.
+
 ## 0.1.2 - 2026-08-14
 
 - Escaped terminal control, line-forging, and bidirectional text from every

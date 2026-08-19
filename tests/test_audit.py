@@ -1,4 +1,4 @@
-"""End-to-end contract tests for the v0.1 vertical slice."""
+"""End-to-end contract tests for the v0.2 vertical slice."""
 
 from __future__ import annotations
 

@@ -70,6 +70,7 @@ def render_report(report: AuditReport) -> str:
         f"  Surface:      {len(report.tools)} MCP tool(s) discovered",
         f"  Scope:        {parameter_count} declared parameter(s)",
         f"  Side effects: {capability_count} reachable capability site(s)",
+        f"  Completeness: {report.completeness.status.value}",
         f"  Snapshot:     sha256:{report.snapshot}",
         "",
     ]
@@ -99,11 +100,86 @@ def render_report(report: AuditReport) -> str:
                     f"    Observed:    {capability_text}",
                 ]
             )
+            for item in report.capabilities.get(tool.key, []):
+                if not item.evidence.path:
+                    continue
+                path = " -> ".join(
+                    f"{display(step.symbol)} ({display(step.source_file)}:{step.line_number})"
+                    for step in item.evidence.path
+                )
+                lines.append(
+                    f"    Evidence:    {display(item.capability.value)}: {path}"
+                )
         lines.append("")
+
+    completeness = report.completeness
+    lines.extend(
+        [
+            f"Completeness ({completeness.status.value})",
+            f"  Registrations: {completeness.supported_registrations} supported, "
+            f"{completeness.unresolved_registrations} unresolved",
+            f"  Resolved reachable local call edges ({len(completeness.resolved_edges)})",
+        ]
+    )
+    if not completeness.resolved_edges:
+        lines.append("    none")
+    else:
+        for resolved_edge in completeness.resolved_edges:
+            lines.append(
+                f"    {display(resolved_edge.tool_name)}: "
+                f"{display(resolved_edge.caller)} -> "
+                f"{display(resolved_edge.target_symbol)} at "
+                f"{display(resolved_edge.source_file)}:{resolved_edge.line_number} "
+                f"[{display(resolved_edge.call_expression)}; target "
+                f"{display(resolved_edge.target_file)}]"
+            )
+
+    lines.append(
+        f"  Unresolved reachable local call edges ({len(completeness.unresolved_edges)})"
+    )
+    if not completeness.unresolved_edges:
+        lines.append("    none")
+    else:
+        for unresolved_edge in completeness.unresolved_edges:
+            candidate = (
+                f"; candidate {display(unresolved_edge.candidate)}"
+                if unresolved_edge.candidate
+                else ""
+            )
+            lines.extend(
+                [
+                    f"    {display(unresolved_edge.tool_name)}: "
+                    f"{display(unresolved_edge.caller)} at "
+                    f"{display(unresolved_edge.source_file)}:{unresolved_edge.line_number}",
+                    f"      Call: {display(unresolved_edge.call_expression)}",
+                    f"      Reason: {display(unresolved_edge.reason.value)}{candidate}",
+                ]
+            )
+
+    if completeness.potential_registrations:
+        lines.append(
+            "  Potential unsupported MCP registrations "
+            f"({completeness.unresolved_registrations})"
+        )
+        for registration in completeness.potential_registrations:
+            lines.append(
+                f"    {display(registration.source_file)}:{registration.line_number} "
+                f"{display(registration.expression)} "
+                f"[{display(registration.reason)}]"
+            )
+    for notification in completeness.notifications:
+        location = display(notification.source_file)
+        if notification.line_number:
+            location = f"{location}:{notification.line_number}"
+        lines.append(
+            f"  Notification {display(notification.code)} at {location}: "
+            f"{display(notification.message)}"
+        )
+    lines.append("")
 
     lines.append(f"Findings ({len(report.findings)})")
     if not report.findings:
-        lines.append("  No contract mismatches or high-risk behavior detected by the v0.1 rules.")
+        lines.append("  No contract mismatches or high-risk behavior detected by the v0.2 rules.")
     else:
         for finding in report.findings:
             lines.extend(

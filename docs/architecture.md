@@ -6,7 +6,9 @@ MCP ScopeCheck detects mismatches between a Python MCP tool's declared contract 
 
 ## Non-goals
 
-v0.1 is not a general Python SAST engine, malware sandbox, dependency scanner, MCP client, or runtime policy gateway. It does not execute servers and does not claim complete program analysis.
+v0.2 is not a general Python SAST engine, malware sandbox, dependency scanner,
+MCP client, or runtime policy gateway. It does not execute servers and does not
+claim complete program analysis.
 
 ## Data flow
 
@@ -14,11 +16,13 @@ v0.1 is not a general Python SAST engine, malware sandbox, dependency scanner, M
 flowchart TD
     A[Local Python source] --> B[AST parser]
     B --> C[Tool and claim model]
-    B --> D[Same-file call graph]
-    D --> E[Capability evidence]
+    B --> D[Bounded local call graph]
+    D --> E[Capability evidence and shortest paths]
+    D --> H[Completeness ledger]
     C --> F[Contract comparison]
     E --> F
-    F --> G[5-S report and exit code]
+    F --> G[5-S text or SARIF and exit code]
+    H --> G
 ```
 
 The target is data throughout this flow. Nothing imports the target or invokes its decorators.
@@ -27,7 +31,8 @@ The target is data throughout this flow. Nothing imports the target or invokes i
 
 - **Untrusted:** every byte under the audit target.
 - **Trusted:** ScopeCheck's parser, rule engine, renderer, and Python runtime.
-- **External systems:** none during a v0.1 audit. The scanner has no network feature and no runtime dependency.
+- **External systems:** none during a v0.2 audit. The scanner has no network
+  feature and no runtime dependency.
 
 ## Terminal-output boundary
 
@@ -35,8 +40,9 @@ Every target-controlled value passes through one display escaping function befor
 it reaches the plain-text report or a normal CLI error. C0 and C1 controls, DEL,
 carriage returns, line feeds, tabs, Unicode line separators, and Unicode
 bidirectional formatting controls are rendered as visible `\uXXXX` sequences.
-Ordinary Unicode remains readable. ScopeCheck does not currently expose a JSON or
-other machine-readable report format.
+Ordinary Unicode remains readable. SARIF uses the same sanitization for untrusted
+messages and properties, percent-encodes relative artifact URIs, and never mixes
+plain-text diagnostics into JSON stdout.
 
 ## Safety limits
 
@@ -46,6 +52,11 @@ other machine-readable report format.
 - All accepted Python source is limited to 20 MB per audit.
 - Parsed trees are limited to 500,000 total AST nodes and 200 AST levels.
 - At most 100 target diagnostics are retained.
+- At most 2,000 local modules may participate in the call graph.
+- At most 20,000 resolved local edges are retained per audit.
+- At most 256 functions and 32 cross-module hops are followed per tool.
+- At most 1,000 capability paths are retained per tool.
+- At most 1,000 unresolved edges and 1,000 potential registrations are retained.
 - Static decorator metadata accepts only bounded JSON-like values. Each tool's
   metadata is limited to 256 decoded nodes, 12 nesting levels, 16,384 UTF-8
   string bytes, 256-bit integers, and 128 collection items.
@@ -61,8 +72,10 @@ other machine-readable report format.
   Symlinked files and directories encountered inside a directory target are
   skipped, and traversal explicitly disables link following.
 
-Invalid or over-budget tool metadata keeps the discovered tool visible but adds
-a deterministic diagnostic, makes the audit incomplete, and yields exit `2`.
+Invalid tool metadata keeps the discovered tool visible but adds a deterministic
+diagnostic, makes the audit partial, and yields exit `2`. Metadata, source, AST,
+diagnostic, registration, or graph budget exhaustion fails analysis and yields
+exit `2`.
 Undecodable source is not partially analyzed and produces the same incomplete
 exit contract.
 File-count, cumulative-byte, AST-node, AST-depth, and diagnostic-count overruns
@@ -72,14 +85,22 @@ outside-root directory-symlink regression passes on CPython 3.11.14, 3.12.12,
 and 3.13.7 and is part of the supported-version test suite.
 Unexpected internal ScopeCheck exceptions are not converted into target errors.
 
-## Reachability model
+## Reachability and completeness model
 
 The root of analysis is each discovered module-level tool function. Direct calls
 to named functions in the same file and directly bound nested sync/async
-functions are followed transitively. Function-local imports are resolved at the
-call site; parameters, assignments, deletion, and later imports update lexical
-bindings in statement order. At control-flow joins, a module/client/path binding
-is retained only when both analyzed paths agree.
+functions are followed transitively. v0.2 also resolves static relative and
+absolute imports to Python files already accepted under the audit root. It
+follows direct imported-function calls, aliases, qualified local-module function
+calls, and one explicit `__init__.py` re-export hop. Resolution requires one
+module file and one module-level function target. Module cycles terminate through
+visited-state tracking.
+
+Function-local imports are resolved at the call site; parameters, assignments,
+deletion, and later imports update lexical bindings in statement order. At
+control-flow joins, a module/client/path binding is retained only when both
+analyzed paths agree. ScopeCheck never imports a module to resolve it, searches
+installed packages, or leaves the accepted audit root.
 
 Defining a nested function or lambda does not make its body reachable. Decorator
 and default expressions are evaluated, while an uncalled nested body is skipped.
@@ -88,17 +109,30 @@ set, and dictionary comprehensions are traversed in their isolated target scope;
 the deferred body of a generator expression is not assumed to run merely because
 the generator is created.
 
-Calls across modules, calls through function aliases or callbacks, lambda
-invocation, class-method dispatch, and higher-order dispatch are outside v0.1.
+Class and instance dispatch, callbacks, assigned function aliases, lambdas,
+partials, wrapper transformations, higher-order calls, wildcard imports, dynamic
+imports, ambiguous modules, missing local targets, and deeper re-exports are not
+guessed. When statically recognizable on a reachable path, they enter the
+unresolved-edge ledger. Low-level Tool lists, `add_tool`, and nested/class-owned
+registration forms are counted as potential registrations but are not claimed as
+analyzed tools.
+
+An audit is `complete` only when supported registrations and reachable local
+edges resolve within all budgets. A recognized unsupported edge or registration
+makes it `partial`. A decode, parse, filesystem, or budget failure makes it
+`failed`. Exit `0` means complete/no threshold finding; exit `1` means
+complete/threshold finding; exit `2` takes precedence for partial or failed
+analysis. Findings discovered before or alongside incompleteness remain visible.
 Control-flow handling is a conservative binding join rather than path-sensitive
-program analysis. This boundary matters: “reachable” means *reachable under this
-documented static model*, not reachable under every possible Python execution.
+program analysis. “Reachable” means reachable under this documented static
+model, not under every possible Python execution.
 
 ## Finding philosophy
 
-Capabilities are facts about code structure; they are not automatically vulnerabilities. For example, filesystem read behavior is expected for a documentation search tool. Findings are emitted when:
+Capabilities are facts about code structure; they are not automatically vulnerabilities. For example, filesystem read behavior is expected for a documentation search tool. A finding is likewise not an automatically confirmed vulnerability. Findings are emitted when:
 
 - a declared claim conflicts with an observed capability;
+- modeled reachable external network egress requires human review;
 - sensitive behavior is undisclosed or insufficiently constrained; or
 - behavior is inherently high-risk in an agent-controlled tool boundary.
 
@@ -113,15 +147,40 @@ context exception avoids treating documentation that discusses common prompt
 injection wording as an instruction. Zero corpus errors describe only the fixed
 local examples; they are not a general accuracy claim.
 
-`MSC102` is deterministic contract-mismatch detection. A disclosure must contain
-both an external target and an interaction action; isolated words such as `API`,
-`web`, `network`, or `remote` are insufficient. Explicit offline/no-network
-wording is a contradiction when egress is reachable. When a literal URL is
-available, ScopeCheck records its host and compares a small set of named services
-such as GitHub with that host. The matched or failed disclosure reason is retained
-in capability/finding evidence. This does not establish endpoint intent, validate
-the description's truthfulness, or understand paraphrases beyond the documented
-patterns.
+`MSC102` is a conservative external-egress review rule with specialized
+contradiction and destination-mismatch subtypes. The reachable network call is
+always reported as an observed capability, and — for modeled network sinks — a
+tool's prose and a matching service hostname never *suppress* the finding.
+Free-text descriptions are an adversarial surface and a service host can serve
+attacker-controlled content, so MSC102 does not treat either as proof of the
+intended destination; it surfaces the call for review and flags anything it cannot
+confirm.
+
+MSC102 fires on reachable egress unless it targets purely local or loopback
+destinations. The sole exemption is `localhost` and loopback/RFC1918/ULA IP
+literals (`127.0.0.1`, `10/8`, `172.16/12`, `192.168/16`, `::1`, `fc00::/7`),
+parsed with the `ipaddress` module so a hostname that merely resembles a private
+range stays external and non-routable ranges (link-local/metadata, benchmarking,
+test-net, reserved) are treated as external. Every resolved external host is
+flagged, even when
+its registrable domain matches a service the description names: GitHub, GitLab, and
+Google serve attacker-controllable content (repos, gists, snippets, buckets,
+webhooks) on the same hosts as their APIs, so a host match cannot prove the
+specific destination is the disclosed one. The service comparison is used only to
+report the more informative "destination does not match" subtype when a named
+service is contradicted by the reachable host.
+
+A destination that cannot be statically resolved — a dynamic or computed URL, the
+common case for client libraries — is always flagged for review, never vouched for
+by wording. An explicit offline/no-network denial is reported as a contradiction;
+denial detection is best-effort and narrow, because a denial it misses simply
+falls through to the generic external-egress review finding rather than
+suppressing it.
+
+This is a deliberate recall-over-precision stance for a security tool: a reachable
+call whose destination cannot be verified is surfaced for a human to confirm. It
+does not establish endpoint intent or validate the description's truthfulness, and
+it will flag well-behaved tools whose URLs are constructed at runtime.
 
 MCP tool annotations are untrusted declarations, not enforcement. ScopeCheck
 accepts the Python-style snake_case and protocol-style camelCase spellings for
@@ -137,35 +196,47 @@ methods remain network capabilities but are not guessed to be writes.
 `MSC108` separately compares any reachable external network interaction with
 `openWorldHint=false`.
 
+Unambiguous cross-module capability evidence may feed `MSC101`, `MSC102`,
+`MSC106`, `MSC107`, and `MSC108`. `MSC103` follows a cross-module path only when
+the direct argument mapping and recognized guard lineage remain supported; an
+unresolved lineage suppresses that inference and produces a completeness
+notification. `MSC105` remains same-function and does not carry taint across a
+call boundary. Capability evidence retains a shortest source path from the
+registered tool to each sink.
+
 Filesystem classification uses resolved builtins and import aliases plus a
 narrow, flow-sensitive model for values constructed from `pathlib.Path`.
 Unresolved receiver methods such as arbitrary `.open()` or `.replace()` calls
 are not guessed to be filesystem operations. Static `open` modes containing
 `w`, `a`, `x`, or `+` and static `os.open` write flags are classified as writes;
 other static modes and `O_RDONLY` are reads. A dynamic mode or flag still proves
-that a supported filesystem API is reached, but not whether it writes, so v0.1
+that a supported filesystem API is reached, but not whether it writes, so v0.2
 records the read capability as a lower bound. This may under-report a dynamic
 write and deliberately does not create a read-only/write contradiction.
 
 Network capability evidence uses a case-sensitive allowlist rather than module
 prefixes. Supported direct sinks are the standard request verbs and `request`
 functions on `httpx`, `requests`, and `requests.api`, `urllib.request.urlopen`,
-`urllib.request.urlretrieve`, and `socket.create_connection`. Supported request
+`urllib.request.urlretrieve`, and `socket.create_connection`. Supported instance
 methods on flow-proven `httpx.Client`, `httpx.AsyncClient`, `requests.Session`,
-and `requests.sessions.Session` instances are also sinks. Constructors,
-request/configuration objects, local utilities, and unknown calls beneath a
-network-related module are not egress evidence.
+`requests.sessions.Session`, `aiohttp.ClientSession`, `urllib3.PoolManager`,
+`urllib3.HTTPConnectionPool`, `http.client.HTTPConnection`,
+`http.client.HTTPSConnection`, and `socket.socket` values are also sinks (for
+`http.client` and raw sockets the request/connect/send methods; `bind`/`listen`/
+`accept`/`recv` are not egress). Constructors, request/configuration objects,
+local utilities, and unknown calls beneath a network-related module are not egress
+evidence.
 
 The context-manager factories `httpx.stream` and `aiohttp.request` are not
-classified in v0.1.2 because a bare factory call does not complete network I/O
-and the analyzer does not yet prove their context entry. `http.client`
-connection methods and raw-socket instance operations are likewise unmodeled;
-they are not guessed from method names. Proven instance methods require a known
+classified in v0.2 because a bare factory call does not complete network I/O and
+the analyzer does not yet prove their context entry. Egress through clients
+outside the recognized set (`pycurl`, `smtplib`, `ftplib`, `websockets`, DNS
+resolvers) is likewise unmodeled. Proven instance methods require a known
 supported constructor binding that remains live at that statement.
 
 `MSC103` tracks exact path-like parameter names and common suffixes such as
-`*_path` through simple aliases, supported path transformations, and direct
-same-file helper calls. A guard applies only to the value lineage checked before
+`*_path` through simple aliases, supported path transformations, and supported
+direct local helper calls. A guard applies only to the value lineage checked before
 the sink. Recognized forms are a successful `Path.relative_to(fixed_root)` call,
 a checked `Path.is_relative_to(fixed_root)` branch whose rejecting path
 terminates, and an equality check between `os.path.commonpath(...)` and an
@@ -179,7 +250,7 @@ dispatch and arbitrary validation helpers.
 `pathlib.Path` defaults. Exact `~` and `~/` defaults are treated as the home root
 only when the default or reachable code applies `Path.expanduser`,
 `os.path.expanduser`, or `Path.home`. Bounded values such as `~/.scopecheck` are
-not equated with the entire home directory. v0.1 does not normalize Windows drive
+not equated with the entire home directory. v0.2 does not normalize Windows drive
 roots or UNC shares, and unresolved dynamic defaults are left unknown.
 
 `MSC105` follows direct environment reads and simple name-to-name or payload

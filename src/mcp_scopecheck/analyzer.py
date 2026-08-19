@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import ipaddress
 import re
 from collections import deque
 from collections.abc import Iterable
@@ -14,10 +15,14 @@ from .models import (
     Evidence,
     Finding,
     ObservedCapability,
+    ResolvedCallEdge,
     Severity,
     ToolDefinition,
+    TraceStep,
+    UnresolvedCallEdge,
+    UnresolvedReason,
 )
-from .parser import FunctionRecord, ParsedProject
+from .parser import FunctionRecord, ParsedProject, _relative_import_name
 
 PATH_READ_METHODS = {"glob", "iterdir", "read_bytes", "read_text", "rglob"}
 PATH_WRITE_METHODS = {
@@ -107,6 +112,20 @@ NETWORK_CLIENT_CONSTRUCTORS = {
     "requests.sessions.Session": frozenset(
         {"delete", "get", "head", "options", "patch", "post", "put", "request", "send"}
     ),
+    "http.client.HTTPConnection": frozenset(
+        {"connect", "request", "putrequest", "send", "endheaders"}
+    ),
+    "http.client.HTTPSConnection": frozenset(
+        {"connect", "request", "putrequest", "send", "endheaders"}
+    ),
+    "socket.socket": frozenset({"connect", "connect_ex", "sendall", "sendto"}),
+    "aiohttp.ClientSession": frozenset(
+        {"delete", "get", "head", "options", "patch", "post", "put", "request", "ws_connect"}
+    ),
+    "urllib3.PoolManager": frozenset(
+        {"request", "urlopen", "request_encode_url", "request_encode_body"}
+    ),
+    "urllib3.HTTPConnectionPool": frozenset({"request", "urlopen"}),
 }
 PROCESS_PREFIXES = ("asyncio.create_subprocess_", "subprocess.")
 PROCESS_CALLS = {"os.popen", "os.system"}
@@ -188,37 +207,83 @@ BENIGN_SECURITY_DISCUSSION = re.compile(
     re.I | re.S,
 )
 
+# --- MSC102 external-network-egress review (conservative, fail-safe) ---
+# ScopeCheck proves reachable network egress from the call graph and always reports
+# it as an observed capability. For modeled network sinks, MSC102 is a mandatory
+# external-egress review signal: no modeled external destination is ever cleared,
+# because neither description prose nor a matching service hostname proves the
+# intended destination (services host attacker-controllable content on the same
+# hosts as their APIs, and prose is an adversarial surface). A dynamic/computed
+# destination is likewise flagged. The ONLY exemption is a destination classified
+# as local/loopback/private by explicit IP-address parsing (see `_is_local_host`).
+# Service matching below is used only to select the more informative
+# destination-mismatch subtype, never to suppress a finding. An explicit network
+# denial produces the contradiction subtype; denial detection is best-effort,
+# because a missed denial still falls through to the generic review finding rather
+# than to silence. Discord is intentionally absent from the service set: its
+# webhook endpoint shares the discord.com host with its API, so a host match would
+# be meaningless there.
+_SERVICE_NAMES = ("github", "gitlab", "gmail", "google", "slack")
+KNOWN_DESTINATIONS = frozenset(_SERVICE_NAMES)
+
+# Sentence segmentation used for negation scoping. Newlines are boundaries so an
+# unpunctuated bullet/argument block does not merge into one span; terminal
+# punctuation splits only when followed by whitespace or end of text, so a dotted
+# hostname or version number is not fragmented mid-token.
+_SENTENCE_SPLIT = re.compile(r"[.!?;]+(?=\s)|[.!?;]+$|[\n\r]+")
+_NEGATION = re.compile(
+    r"\b(?:not|never|no|without|cannot|can't|won't|will\s+not|shall\s+not|"
+    r"does\s+not|doesn't|do\s+not|don't|didn't|isn't|aren't|n't)\b",
+    re.I,
+)
+
+# Explicit denial of network access -> a contradiction when egress is reachable.
+# The negation must attach to the egress verb (0-1 words apart) so unrelated
+# negations such as "does not require an API key to access the endpoint" do not
+# read as denials.
+_DENIAL_VERB = (
+    r"(?:access(?:es|ed|ing)?|call(?:s|ed|ing)?|connect(?:s|ed|ing)?|"
+    r"contact(?:s|ed|ing)?|download(?:s|ed|ing)?|fetch(?:es|ed|ing)?|"
+    r"quer(?:y|ies|ied|ying)|reach(?:es|ed|ing)?|request(?:s|ed|ing)?|"
+    r"send(?:s|ing)?|sent|talk(?:s|ed|ing)?|transmit(?:s|ted|ting)?|"
+    r"upload(?:s|ed|ing)?|us(?:e|es|ed|ing))"
+)
+# Denial targets are deliberately narrow: only unambiguously network-scoped words.
+# Generic terms ("url", "server", "endpoint"), bare service names, dotted module
+# paths ("os.path"), and filenames ("requirements.txt") are excluded so unrelated
+# negations are not misread as denials. A missed denial is not a safety problem
+# under this rule: it simply falls through to the generic external-egress review
+# finding instead of the contradiction subtype.
+_DENIAL_TARGET = r"(?:internet|networks?|remote|external|outbound)"
 NETWORK_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
-        r"\b(?:never|does\s+not|doesn't|do\s+not|don't)\b.{0,40}"
-        r"\b(?:send|transmit|upload|use|access|connect)\w*\b.{0,24}"
-        r"\b(?:internet|network|remote|external|data)\b",
-        re.I | re.S,
+        r"\b(?:never|not|cannot|can't|won't|will\s+not|shall\s+not|"
+        r"do(?:es)?\s+not|don't|doesn't)\s+(?:\w+\s+){0,1}"
+        + _DENIAL_VERB + r"\s+(?:\w+\s+){0,4}?" + _DENIAL_TARGET + r"\b",
+        re.I,
     ),
     re.compile(
         r"\b(?:no|without)\s+"
-        r"(?:external\s+|internet\s+|network\s+|remote\s+)?"
+        r"(?:external\s+|internet\s+|network\s+|remote\s+|outbound\s+)?"
         r"(?:access|connection|egress|requests?|traffic)\b",
         re.I,
     ),
     re.compile(
-        r"\b(?:fully\s+local|local[- ]only|offline(?:[- ]only)?|"
-        r"runs?\s+(?:locally|offline)(?:\s+only)?)\b",
+        r"\b(?:fully\s+local|local[- ]only|offline(?:[- ]only)?|air[- ]gapped|"
+        r"runs?\s+(?:locally|offline)(?:\s+only)?|"
+        r"(?:no\s+data|nothing)\s+(?:ever\s+)?leaves|"
+        r"stays?\s+(?:entirely\s+|fully\s+)?on\s+(?:your|the\s+local)|"
+        r"no\s+outbound\s+traffic)\b",
         re.I,
     ),
 )
-NETWORK_INTERACTION = re.compile(
-    r"\b(?:call|connect|contact|download|fetch|forward|post|publish|quer(?:y|ies)|"
-    r"request|retrieve|send|transmit|upload)\w*\b",
-    re.I,
-)
-EXTERNAL_TARGET = re.compile(
-    r"\b(?:external|internet|online|public\s+web|remote|third[- ]party)\b|"
-    r"\b(?:api\.|hooks\.|webhook\.)[a-z0-9.-]+\b|"
-    r"\b[a-z0-9-]+\.(?:com|dev|io|net|org)(?:\b|/)",
-    re.I,
-)
-KNOWN_DESTINATIONS = frozenset({"discord", "github", "gitlab", "google", "slack"})
+
+MAX_RESOLVED_LOCAL_EDGES = 20_000
+MAX_UNRESOLVED_LOCAL_EDGES = 1_000
+MAX_LOCAL_MODULES = 2_000
+MAX_REACHABLE_FUNCTIONS_PER_TOOL = 256
+MAX_CROSS_MODULE_HOPS = 32
+MAX_CAPABILITY_PATHS_PER_TOOL = 1_000
 
 
 @dataclass(frozen=True)
@@ -232,6 +297,61 @@ class _DisclosureAssessment:
     disclosed: bool
     reason: str
     contradiction: bool = False
+
+
+@dataclass(frozen=True)
+class _NetworkDestinations:
+    """Statically resolved destinations of a tool's reachable network egress.
+
+    `unresolved` is True when any reachable egress call has a destination that
+    cannot be read from a string literal (dynamic/computed URL), which must be
+    flagged for review rather than trusted.
+    """
+
+    external: tuple[str, ...] = ()
+    local: tuple[str, ...] = ()
+    unresolved: bool = False
+
+
+_LOCAL_NETWORKS = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in (
+        "127.0.0.0/8",  # loopback
+        "10.0.0.0/8",  # RFC1918
+        "172.16.0.0/12",  # RFC1918
+        "192.168.0.0/16",  # RFC1918
+        "::1/128",  # IPv6 loopback
+        "fc00::/7",  # IPv6 unique-local
+    )
+)
+
+
+def _is_local_host(host: str) -> bool:
+    """True only for the localhost name and genuine loopback/RFC1918/ULA IPs.
+
+    Parses the host as an IP address so a hostname merely resembling a private range
+    ("10.example.com", "127.0.0.1.evil.com") is treated as external, not dropped.
+    Only loopback, RFC1918, and IPv6 unique-local addresses count as local; every
+    other address — link-local (including 169.254.169.254 cloud metadata),
+    benchmarking, test-net, reserved, and all globally routable hosts — is external
+    and flagged, so local/loopback is the one exemption and nothing routable slips
+    through it.
+    """
+
+    name = host.lower().strip(".")
+    if name == "localhost" or name.endswith(".localhost"):
+        return True
+    candidate = name[1:-1] if name.startswith("[") and name.endswith("]") else name
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        return False
+    # Unwrap IPv4-mapped IPv6 (::ffff:a.b.c.d) so an external mapped address is not
+    # read as private on CPython versions that classified the whole block private.
+    mapped = getattr(address, "ipv4_mapped", None)
+    if mapped is not None:
+        address = mapped
+    return any(address in network for network in _LOCAL_NETWORKS)
 
 
 def _poisoning_indicator(description: str) -> _DescriptionIndicator | None:
@@ -257,44 +377,148 @@ def _poisoning_indicator(description: str) -> _DescriptionIndicator | None:
     return matches[0]
 
 
+# Public registrable domains for each named service. A host match here NEVER clears
+# a finding — every modeled external destination is flagged regardless. The match is
+# used only to decide whether a reachable host is consistent with a service the
+# description names: an inconsistency yields the destination-mismatch subtype, and a
+# consistent host still yields the generic external-egress review finding. The list
+# is kept to first-party API domains (user-content/redirect domains such as
+# github.io and *.githubusercontent.com are omitted) so the mismatch subtype stays
+# meaningful; it is not a trust or allow decision.
+_SERVICE_DOMAINS: dict[str, frozenset[str]] = {
+    "github": frozenset({"github.com"}),
+    "gitlab": frozenset({"gitlab.com"}),
+    "gmail": frozenset({"gmail.com", "google.com", "googleapis.com"}),
+    "google": frozenset({"google.com", "googleapis.com", "gstatic.com"}),
+    "slack": frozenset({"slack.com"}),
+}
+
+# Hosts that sit on a first-party registrable domain but serve arbitrary
+# user-controlled endpoints (buckets, gists, deployed scripts, incoming webhooks).
+# Because no external host is ever cleared, this list does not affect suppression;
+# it only prevents such a host from being counted as "consistent" with a named
+# service, so egress to it is reported as a destination mismatch rather than a plain
+# review finding.
+_UNTRUSTED_SERVICE_HOSTS = (
+    "storage.googleapis.com",
+    "firebasestorage.googleapis.com",
+    "script.google.com",
+    "sites.google.com",
+    "docs.google.com",
+    "drive.google.com",
+    "chat.googleapis.com",
+    "gist.github.com",
+    "hooks.slack.com",
+)
+
+
+def _registrable_domain(host: str) -> str:
+    """Approximate the registrable domain (eTLD+1) as the last two DNS labels."""
+
+    labels = [label for label in host.lower().split(".") if label]
+    return ".".join(labels[-2:]) if len(labels) >= 2 else host.lower()
+
+
+def _host_matches_service(host: str, service: str) -> bool:
+    """True when a reachable host is consistent with a named service (registrable
+    domain on the service list, excluding user-content/webhook hosts). This selects
+    the destination-mismatch subtype only; it never clears an external egress
+    finding."""
+
+    host = host.lower().strip(".")
+    if any(host == deny or host.endswith(f".{deny}") for deny in _UNTRUSTED_SERVICE_HOSTS):
+        return False
+    return _registrable_domain(host) in _SERVICE_DOMAINS.get(service, frozenset())
+
+
+def _normalize_apostrophes(text: str) -> str:
+    """Fold typographic apostrophes to ASCII so negation and denial matching is
+    not defeated by a curly quote in "doesn't"/"won't"."""
+
+    return text.replace("’", "'").replace("‘", "'").replace("ʼ", "'")
+
+
+def _sentences(description: str) -> list[str]:
+    return [
+        " ".join(fragment.split())
+        for fragment in _SENTENCE_SPLIT.split(_normalize_apostrophes(description))
+        if fragment.strip()
+    ]
+
+
 def _assess_network_disclosure(
     description: str,
-    static_hosts: Iterable[str] = (),
+    destinations: _NetworkDestinations,
 ) -> _DisclosureAssessment:
-    normalized = " ".join(description.split())
-    for pattern in NETWORK_DENIAL_PATTERNS:
-        denial = pattern.search(normalized)
-        if denial is not None:
+    external = destinations.external
+
+    # 0. Purely local/loopback egress is not external network access, so a "never
+    # uses the network" denial about it is truthful rather than a contradiction.
+    if not external and not destinations.unresolved:
+        if destinations.local:
+            return _DisclosureAssessment(
+                True, "reachable network calls target only local or loopback hosts"
+            )
+        return _DisclosureAssessment(
+            False, "reachable network egress has no statically resolved destination"
+        )
+
+    sentences = _sentences(description)
+
+    # 1. Explicit denial of network access, scoped to a sentence -> contradiction.
+    # Best-effort: a denial this misses still flags below rather than suppressing.
+    for sentence in sentences:
+        for pattern in NETWORK_DENIAL_PATTERNS:
+            denial = pattern.search(sentence)
+            if denial is not None:
+                return _DisclosureAssessment(
+                    False,
+                    "description contradicts reachable egress with denial "
+                    f"{denial.group(0)!r}",
+                    contradiction=True,
+                )
+
+    # A service counts as a named destination only in a non-negated sentence, so a
+    # denial ("never contacts Slack") can never double as a disclosure.
+    described = sorted(
+        service
+        for service in KNOWN_DESTINATIONS
+        if any(
+            re.search(rf"\b{service}\b", sentence, re.I) and not _NEGATION.search(sentence)
+            for sentence in sentences
+        )
+    )
+
+    if external:
+        # A resolved external host is never cleared, even when its registrable
+        # domain matches a named service: GitHub, GitLab, and Google serve
+        # attacker-controllable content (repos, gists, snippets, buckets, webhooks)
+        # on the same hosts as their APIs, so a host match cannot prove the specific
+        # destination is the disclosed one. The service comparison is used only to
+        # choose the more informative subtype when a named service is contradicted.
+        unmatched = [
+            host
+            for host in external
+            if not any(_host_matches_service(host, service) for service in described)
+        ]
+        if described and unmatched:
             return _DisclosureAssessment(
                 False,
-                f"description contradicts reachable egress with denial {denial.group(0)!r}",
-                contradiction=True,
+                f"described destination {described!r} does not match "
+                f"static host(s) {unmatched!r}",
             )
-
-    interaction = NETWORK_INTERACTION.search(normalized)
-    target = EXTERNAL_TARGET.search(normalized)
-    if interaction is None or target is None:
         return _DisclosureAssessment(
             False,
-            "description does not state both an external interaction and an interaction action",
+            f"reachable external host(s) {list(external)!r} are not verifiably "
+            "disclosed",
         )
 
-    hosts = tuple(sorted(set(static_hosts)))
-    destination_terms = {
-        term for term in KNOWN_DESTINATIONS if re.search(rf"\b{term}\b", normalized, re.I)
-    }
-    if hosts and destination_terms and not any(
-        term in host for term in destination_terms for host in hosts
-    ):
-        return _DisclosureAssessment(
-            False,
-            "described destination "
-            f"{sorted(destination_terms)!r} does not match static host(s) {list(hosts)!r}",
-        )
-
+    # No external host resolved, but a dynamic/computed destination remains. It
+    # cannot be verified, so it is flagged, never suppressed by prose.
     return _DisclosureAssessment(
-        True,
-        f"matched external target {target.group(0)!r} and action {interaction.group(0)!r}",
+        False,
+        "the reachable network destination is not statically resolvable and is "
+        "not disclosed",
     )
 
 
@@ -329,7 +553,7 @@ def _local_calls(record: FunctionRecord, project: ParsedProject) -> Iterable[Fun
 
 
 def reachable_functions(project: ParsedProject, tool: ToolDefinition) -> list[FunctionRecord]:
-    """Return same-file functions reachable from a tool, without executing code."""
+    """Return bounded local functions reachable from a tool, without executing code."""
 
     root = project.functions.get((tool.source_file, tool.function_name))
     if root is None:
@@ -337,7 +561,7 @@ def reachable_functions(project: ParsedProject, tool: ToolDefinition) -> list[Fu
     queue: deque[FunctionRecord] = deque([root])
     visited: set[int] = set()
     records: list[FunctionRecord] = []
-    while queue:
+    while queue and len(records) < MAX_REACHABLE_FUNCTIONS_PER_TOOL:
         record = queue.popleft()
         key = id(record.node)
         if key in visited:
@@ -346,6 +570,420 @@ def reachable_functions(project: ParsedProject, tool: ToolDefinition) -> list[Fu
         records.append(record)
         queue.extend(_local_calls(record, project))
     return records
+
+
+def _reachable_function_paths(
+    project: ParsedProject,
+    tool: ToolDefinition,
+) -> dict[int, tuple[TraceStep, ...]]:
+    root = project.functions.get((tool.source_file, tool.function_name))
+    if root is None:
+        return {}
+    root_path = (TraceStep(tool.source_file, tool.line_number, tool.function_name),)
+    queue: deque[tuple[FunctionRecord, tuple[TraceStep, ...]]] = deque([(root, root_path)])
+    paths: dict[int, tuple[TraceStep, ...]] = {}
+    while queue and len(paths) < MAX_REACHABLE_FUNCTIONS_PER_TOOL:
+        record, path = queue.popleft()
+        identity = id(record.node)
+        if identity in paths:
+            continue
+        paths[identity] = path
+        execution = _execution(record, project)
+        for _, callee in sorted(
+            (
+                (node, execution.call_edges_by_call[id(node)])
+                for node in execution.nodes
+                if isinstance(node, ast.Call) and id(node) in execution.call_edges_by_call
+            ),
+            key=lambda item: (_line_number(item[0]), item[1].source_file, item[1].node.name),
+        ):
+            queue.append(
+                (
+                    callee,
+                    path
+                    + (
+                        TraceStep(
+                            callee.source_file,
+                            _line_number(callee.node),
+                            callee.node.name,
+                        ),
+                    ),
+                )
+            )
+    return paths
+
+
+def _call_expression(node: ast.AST) -> str:
+    try:
+        value = ast.unparse(node)
+    except Exception:
+        value = type(node).__name__
+    return value if len(value) <= 240 else f"{value[:239]}…"
+
+
+@dataclass(frozen=True)
+class _LocalCallResolution:
+    target: FunctionRecord | None = None
+    reason: UnresolvedReason | None = None
+    candidate: str = ""
+
+
+def _absolute_import_name(
+    project: ParsedProject,
+    source_file: str,
+    name: str,
+) -> str:
+    if not name.startswith("."):
+        return name
+    level = len(name) - len(name.lstrip("."))
+    suffix = name[level:]
+    modules = project.file_modules.get(source_file, ())
+    if not modules:
+        return suffix
+    current = modules[0]
+    package = current.split(".")
+    if not source_file.endswith("/__init__.py") and source_file != "__init__.py":
+        package = package[:-1]
+    remove = max(level - 1, 0)
+    if remove > len(package):
+        return suffix
+    if remove:
+        package = package[:-remove]
+    if suffix:
+        package.extend(part for part in suffix.split(".") if part)
+    return ".".join(package)
+
+
+def _resolve_qualified_local(
+    project: ParsedProject,
+    source_file: str,
+    qualified: str,
+    *,
+    allow_reexport: bool = True,
+    direct_symbol: bool = False,
+) -> _LocalCallResolution:
+    candidate = _absolute_import_name(project, source_file, qualified)
+    parts = [part for part in candidate.split(".") if part]
+    for boundary in range(len(parts) - 1, 0, -1):
+        module = ".".join(parts[:boundary])
+        files = project.module_files.get(module)
+        if not files:
+            continue
+        remainder = parts[boundary:]
+        if len(files) != 1:
+            return _LocalCallResolution(
+                reason=UnresolvedReason.AMBIGUOUS_LOCAL_TARGET,
+                candidate=candidate,
+            )
+        target_file = files[0]
+        if len(remainder) != 1:
+            return _LocalCallResolution(
+                reason=(
+                    UnresolvedReason.MISSING_LOCAL_TARGET
+                    if direct_symbol
+                    else UnresolvedReason.UNSUPPORTED_INSTANCE_DISPATCH
+                ),
+                candidate=candidate,
+            )
+        symbol = remainder[0]
+        target = project.functions.get((target_file, symbol))
+        if target is not None:
+            return _LocalCallResolution(target=target, candidate=candidate)
+        if (target_file, symbol) in project.classes:
+            return _LocalCallResolution(
+                reason=UnresolvedReason.UNSUPPORTED_INSTANCE_DISPATCH,
+                candidate=candidate,
+            )
+        if allow_reexport and target_file.endswith("__init__.py"):
+            imported = project.module_imports.get(target_file, {}).get(symbol)
+            if imported:
+                resolved = _resolve_qualified_local(
+                    project,
+                    target_file,
+                    imported,
+                    allow_reexport=False,
+                    direct_symbol=True,
+                )
+                if resolved.target is not None:
+                    return resolved
+                return _LocalCallResolution(
+                    reason=UnresolvedReason.UNRESOLVED_REEXPORT,
+                    candidate=candidate,
+                )
+        return _LocalCallResolution(
+            reason=UnresolvedReason.MISSING_LOCAL_TARGET,
+            candidate=candidate,
+        )
+
+    local_roots = {name.split(".", 1)[0] for name in project.module_files}
+    if qualified.startswith(".") or (parts and parts[0] in local_roots):
+        return _LocalCallResolution(
+            reason=UnresolvedReason.MISSING_LOCAL_TARGET,
+            candidate=candidate,
+        )
+    return _LocalCallResolution()
+
+
+def _resolve_local_call(
+    project: ParsedProject,
+    record: FunctionRecord,
+    call: ast.Call,
+    imports: dict[str, str],
+) -> _LocalCallResolution:
+    if isinstance(call.func, ast.Name):
+        name = call.func.id
+        if name not in imports:
+            target = project.functions.get((record.source_file, name))
+            if target is not None:
+                return _LocalCallResolution(target=target)
+            return _LocalCallResolution()
+        imported = imports.get(name, "")
+        if not imported:
+            return _LocalCallResolution()
+        return _resolve_qualified_local(
+            project,
+            record.source_file,
+            imported,
+            direct_symbol=True,
+        )
+
+    if not isinstance(call.func, ast.Attribute):
+        return _LocalCallResolution()
+    base = call.func.value
+    while isinstance(base, ast.Attribute):
+        base = base.value
+    if not isinstance(base, ast.Name) or not imports.get(base.id):
+        return _LocalCallResolution()
+    qualified = _qualified_name(call.func, imports)
+    return _resolve_qualified_local(project, record.source_file, qualified)
+
+
+def analyze_reachability(
+    project: ParsedProject,
+    tool: ToolDefinition,
+) -> tuple[list[ResolvedCallEdge], list[UnresolvedCallEdge], bool]:
+    """Build a bounded honesty ledger for one registered tool."""
+
+    root = project.functions.get((tool.source_file, tool.function_name))
+    if root is None:
+        return [], [], False
+    queue: deque[tuple[FunctionRecord, int]] = deque([(root, 0)])
+    visited: set[int] = set()
+    participating_modules: set[str] = set()
+    resolved: dict[tuple[object, ...], ResolvedCallEdge] = {}
+    unresolved: dict[tuple[object, ...], UnresolvedCallEdge] = {}
+    budget_exceeded = False
+
+    def add_unresolved(
+        record: FunctionRecord,
+        node: ast.AST,
+        reason: UnresolvedReason,
+        candidate: str = "",
+    ) -> None:
+        nonlocal budget_exceeded
+        edge = UnresolvedCallEdge(
+            tool.name,
+            record.source_file,
+            _line_number(node),
+            record.node.name,
+            _call_expression(node),
+            reason,
+            candidate,
+        )
+        key = (
+            edge.tool_name,
+            edge.source_file,
+            edge.line_number,
+            edge.caller,
+            edge.call_expression,
+            edge.reason,
+            edge.candidate,
+        )
+        unresolved[key] = edge
+        if len(unresolved) > MAX_UNRESOLVED_LOCAL_EDGES:
+            budget_exceeded = True
+
+    for line_number, expression in tool.wrapper_expressions:
+        edge = UnresolvedCallEdge(
+            tool.name,
+            tool.source_file,
+            line_number,
+            tool.function_name,
+            expression,
+            UnresolvedReason.WRAPPER_INDIRECTION,
+        )
+        unresolved[
+            (
+                edge.tool_name,
+                edge.source_file,
+                edge.line_number,
+                edge.caller,
+                edge.call_expression,
+                edge.reason,
+                edge.candidate,
+            )
+        ] = edge
+
+    for line_number, module in root.wildcard_imports:
+        edge = UnresolvedCallEdge(
+            tool.name,
+            root.source_file,
+            line_number,
+            root.node.name,
+            f"from {module} import *",
+            UnresolvedReason.WILDCARD_IMPORT,
+            module,
+        )
+        unresolved[
+            (
+                edge.tool_name,
+                edge.source_file,
+                edge.line_number,
+                edge.caller,
+                edge.call_expression,
+                edge.reason,
+                edge.candidate,
+            )
+        ] = edge
+
+    while queue and not budget_exceeded:
+        record, cross_module_hops = queue.popleft()
+        identity = id(record.node)
+        if identity in visited:
+            continue
+        visited.add(identity)
+        participating_modules.add(record.source_file)
+        if (
+            len(visited) > MAX_REACHABLE_FUNCTIONS_PER_TOOL
+            or len(participating_modules) > MAX_LOCAL_MODULES
+        ):
+            budget_exceeded = True
+            break
+        execution = _execution(record, project)
+        parameters = _parameter_names(record.node)
+        for node in execution.nodes:
+            if isinstance(node, ast.ImportFrom) and any(
+                item.name == "*" for item in node.names
+            ):
+                add_unresolved(
+                    record,
+                    node,
+                    UnresolvedReason.WILDCARD_IMPORT,
+                    node.module or "",
+                )
+                continue
+            if not isinstance(node, ast.Call):
+                continue
+            callee = execution.call_edges_by_call.get(id(node))
+            if callee is not None:
+                resolved_edge = ResolvedCallEdge(
+                    tool.name,
+                    record.source_file,
+                    _line_number(node),
+                    record.node.name,
+                    _call_expression(node),
+                    callee.source_file,
+                    callee.node.name,
+                )
+                resolved[
+                    (
+                        resolved_edge.tool_name,
+                        resolved_edge.source_file,
+                        resolved_edge.line_number,
+                        resolved_edge.caller,
+                        resolved_edge.call_expression,
+                        resolved_edge.target_file,
+                        resolved_edge.target_symbol,
+                    )
+                ] = resolved_edge
+                next_hops = cross_module_hops + int(callee.source_file != record.source_file)
+                if callee.source_file != record.source_file and (
+                    any(isinstance(argument, ast.Starred) for argument in node.args)
+                    or any(keyword.arg is None for keyword in node.keywords)
+                ):
+                    add_unresolved(
+                        record,
+                        node,
+                        UnresolvedReason.UNRESOLVED_ARGUMENT_LINEAGE,
+                        f"{callee.source_file}:{callee.node.name}",
+                    )
+                if next_hops > MAX_CROSS_MODULE_HOPS:
+                    add_unresolved(
+                        record,
+                        node,
+                        UnresolvedReason.GRAPH_RESOURCE_BUDGET,
+                        f"maximum cross-module depth {MAX_CROSS_MODULE_HOPS}",
+                    )
+                    budget_exceeded = True
+                    break
+                queue.append((callee, next_hops))
+                if len(resolved) > MAX_RESOLVED_LOCAL_EDGES:
+                    budget_exceeded = True
+                continue
+
+            imports = execution.imports_for(node)
+            local_unresolved = execution.unresolved_local_calls.get(id(node))
+            if local_unresolved is not None:
+                reason, candidate = local_unresolved
+                add_unresolved(record, node, reason, candidate)
+                continue
+            name = _qualified_name(node.func, imports)
+            if name in {"importlib.import_module", "__import__", "builtins.__import__"}:
+                add_unresolved(record, node, UnresolvedReason.DYNAMIC_IMPORT, name)
+            elif isinstance(node.func, ast.Name) and (
+                node.func.id in parameters or imports.get(node.func.id) == ""
+            ):
+                add_unresolved(
+                    record,
+                    node,
+                    UnresolvedReason.HIGHER_ORDER_CALL,
+                    node.func.id,
+                )
+            elif (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and (
+                    node.func.value.id in {"self", "cls"}
+                    or (
+                        node.func.value.id in parameters
+                        and _parameter_has_local_class_annotation(
+                            project,
+                            record,
+                            node.func.value.id,
+                        )
+                    )
+                )
+            ):
+                add_unresolved(
+                    record,
+                    node,
+                    UnresolvedReason.UNSUPPORTED_INSTANCE_DISPATCH,
+                    _call_expression(node.func),
+                )
+
+    resolved_values = sorted(
+        resolved.values(),
+        key=lambda item: (
+            item.tool_name,
+            item.source_file,
+            item.line_number,
+            item.caller,
+            item.target_file,
+            item.target_symbol,
+        ),
+    )[:MAX_RESOLVED_LOCAL_EDGES]
+    unresolved_values = sorted(
+        unresolved.values(),
+        key=lambda item: (
+            item.tool_name,
+            item.source_file,
+            item.line_number,
+            item.caller,
+            item.reason.value,
+            item.call_expression,
+        ),
+    )[:MAX_UNRESOLVED_LOCAL_EDGES]
+    return resolved_values, unresolved_values, budget_exceeded
 
 
 def _mode_capability(call: ast.Call, positional_index: int) -> Capability:
@@ -459,6 +1097,9 @@ class _ExecutionResult:
     imports_by_node: dict[int, dict[str, str]] = field(default_factory=dict)
     call_edges: list[FunctionRecord] = field(default_factory=list)
     call_edges_by_call: dict[int, FunctionRecord] = field(default_factory=dict)
+    unresolved_local_calls: dict[int, tuple[UnresolvedReason, str]] = field(
+        default_factory=dict
+    )
     nested_call_ids: set[int] = field(default_factory=set)
     instance_network_calls: dict[int, str] = field(default_factory=dict)
     path_filesystem_calls: dict[int, tuple[str, Capability]] = field(default_factory=dict)
@@ -490,6 +1131,32 @@ def _parameter_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     if arguments.kwarg is not None:
         names.add(arguments.kwarg.arg)
     return names
+
+
+def _parameter_has_local_class_annotation(
+    project: ParsedProject,
+    record: FunctionRecord,
+    parameter_name: str,
+) -> bool:
+    arguments = [
+        *record.node.args.posonlyargs,
+        *record.node.args.args,
+        *record.node.args.kwonlyargs,
+    ]
+    argument = next((item for item in arguments if item.arg == parameter_name), None)
+    if argument is None or argument.annotation is None:
+        return False
+    qualified = _qualified_name(argument.annotation, record.imports)
+    candidate = _absolute_import_name(project, record.source_file, qualified)
+    if (record.source_file, candidate) in project.classes:
+        return True
+    for source_file, symbol in project.classes:
+        if symbol != candidate.rsplit(".", 1)[-1]:
+            continue
+        for module in project.file_modules.get(source_file, ()):
+            if candidate == f"{module}.{symbol}":
+                return True
+    return False
 
 
 class _ExecutionVisitor(ast.NodeVisitor):
@@ -628,18 +1295,15 @@ class _ExecutionVisitor(ast.NodeVisitor):
             dict(self.imports),
             frozenset(self.paths),
             dict(self.clients),
+            self.record.wildcard_imports,
         )
 
-    def _direct_call_edge(self, call: ast.Call) -> FunctionRecord | None:
-        if not isinstance(call.func, ast.Name):
-            return None
-        name = call.func.id
-        nested = self.nested.get(name)
-        if nested is not None:
-            return self._nested_record(nested)
-        if name in self.imports:
-            return None
-        return self.project.functions.get((self.record.source_file, name))
+    def _direct_call_resolution(self, call: ast.Call) -> _LocalCallResolution:
+        if isinstance(call.func, ast.Name):
+            nested = self.nested.get(call.func.id)
+            if nested is not None:
+                return _LocalCallResolution(target=self._nested_record(nested))
+        return _resolve_local_call(self.project, self.record, call, self.result.imports_for(call))
 
     def _state(self) -> _BindingState:
         return _BindingState(
@@ -686,7 +1350,8 @@ class _ExecutionVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         self._remember(node, event=True)
         imports = self.result.imports_for(node)
-        edge = self._direct_call_edge(node)
+        resolution = self._direct_call_resolution(node)
+        edge = resolution.target
         is_nested_edge = (
             isinstance(node.func, ast.Name) and node.func.id in self.nested
         )
@@ -702,6 +1367,11 @@ class _ExecutionVisitor(ast.NodeVisitor):
             self.result.call_edges_by_call[id(node)] = edge
             if is_nested_edge:
                 self.result.nested_call_ids.add(id(node))
+        elif resolution.reason is not None:
+            self.result.unresolved_local_calls[id(node)] = (
+                resolution.reason,
+                resolution.candidate,
+            )
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
         self._remember(node)
@@ -747,18 +1417,18 @@ class _ExecutionVisitor(ast.NodeVisitor):
         self._update_targets(node.targets)
 
     def visit_Import(self, node: ast.Import) -> None:
+        self._remember(node)
         for item in node.names:
             name = item.asname or item.name.split(".")[0]
             self._shadow_name(name)
             self.imports[name] = item.name if item.asname else name
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        if node.module is None:
-            return
+        self._remember(node)
         for item in node.names:
             name = item.asname or item.name
             self._shadow_name(name)
-            self.imports[name] = f"{node.module}.{item.name}"
+            self.imports[name] = _relative_import_name(node, item)
 
     def _definition_expressions(
         self,
@@ -908,8 +1578,20 @@ def _static_network_endpoint(call: ast.Call, symbol: str) -> str | None:
     return None
 
 
-def _static_network_hosts(project: ParsedProject, tool: ToolDefinition) -> tuple[str, ...]:
-    hosts: set[str] = set()
+def _network_destinations(
+    project: ParsedProject,
+    tool: ToolDefinition,
+) -> _NetworkDestinations:
+    """Classify the reachable network egress destinations of a tool.
+
+    Every reachable egress call whose destination is not a resolvable string
+    literal marks the result `unresolved`, so a dynamic or computed destination is
+    flagged for review rather than trusted.
+    """
+
+    external: set[str] = set()
+    local: set[str] = set()
+    unresolved = False
     for record in reachable_functions(project, tool):
         execution = _execution(record, project)
         for node in execution.nodes:
@@ -922,22 +1604,29 @@ def _static_network_hosts(project: ParsedProject, tool: ToolDefinition) -> tuple
                 if _call_capability(node, symbol, imports) != Capability.NETWORK_EGRESS:
                     continue
             endpoint = _static_network_endpoint(node, symbol)
-            if endpoint is None:
+            host = urlsplit(endpoint).hostname if endpoint is not None else None
+            if not host:
+                unresolved = True
                 continue
-            host = urlsplit(endpoint).hostname
-            if host:
-                hosts.add(host.lower())
-    return tuple(sorted(hosts))
+            host = host.lower()
+            (local if _is_local_host(host) else external).add(host)
+    return _NetworkDestinations(
+        external=tuple(sorted(external)),
+        local=tuple(sorted(local)),
+        unresolved=unresolved,
+    )
 
 
 def analyze_capabilities(
     project: ParsedProject,
     tool: ToolDefinition,
-) -> list[ObservedCapability]:
+) -> tuple[list[ObservedCapability], bool]:
     """Find side effects in code reachable from one MCP tool."""
 
     observed: list[ObservedCapability] = []
     seen: set[tuple[Capability, str, int, str]] = set()
+    paths = _reachable_function_paths(project, tool)
+    budget_exceeded = False
     for record in reachable_functions(project, tool):
         execution = _execution(record, project)
         for node in execution.nodes:
@@ -981,9 +1670,19 @@ def analyze_capabilities(
                         line_number,
                         symbol,
                         detail,
+                        paths.get(
+                            id(record.node),
+                            (TraceStep(tool.source_file, tool.line_number, tool.function_name),),
+                        )
+                        + (TraceStep(record.source_file, line_number, symbol),),
                     ),
                 )
             )
+            if len(observed) > MAX_CAPABILITY_PATHS_PER_TOOL:
+                budget_exceeded = True
+                break
+        if budget_exceeded:
+            break
     observed.sort(
         key=lambda item: (
             item.capability.value,
@@ -991,7 +1690,7 @@ def analyze_capabilities(
             item.evidence.symbol,
         )
     )
-    return observed
+    return observed[:MAX_CAPABILITY_PATHS_PER_TOOL], budget_exceeded
 
 
 @dataclass(frozen=True)
@@ -1691,6 +2390,7 @@ def analyze_contract(
     project: ParsedProject,
     tool: ToolDefinition,
     observed: list[ObservedCapability],
+    unresolved_edges: Iterable[UnresolvedCallEdge] = (),
 ) -> list[Finding]:
     """Compare declared tool behavior with statically observed capabilities."""
 
@@ -1774,7 +2474,7 @@ def analyze_contract(
     if Capability.NETWORK_EGRESS in capabilities:
         assessment = _assess_network_disclosure(
             tool.description,
-            _static_network_hosts(project, tool),
+            _network_destinations(project, tool),
         )
         network_evidence = by_capability[Capability.NETWORK_EGRESS]
         disclosure_detail = f"description check: {assessment.reason}"
@@ -1788,6 +2488,7 @@ def analyze_contract(
                     item.evidence.line_number,
                     item.evidence.symbol,
                     f"{item.evidence.detail}; {disclosure_detail}",
+                    item.evidence.path,
                 ),
             )
         if not assessment.disclosed:
@@ -1804,8 +2505,12 @@ def analyze_contract(
                     f"in the description. Deterministic check: {assessment.reason}."
                 )
             else:
-                title = "Network egress is not disclosed"
-                message = "A reachable network call is absent from the tool's description."
+                title = "External network egress requires review"
+                message = (
+                    "A modeled reachable external network call was found. ScopeCheck "
+                    "does not treat description prose or a matching service hostname "
+                    "as proof of the intended destination."
+                )
             findings.append(
                 _finding(
                     "MSC102",
@@ -1813,12 +2518,14 @@ def analyze_contract(
                     Severity.HIGH,
                     tool,
                     message,
-                    "State the destination and data purpose, or remove network access.",
+                    "Verify and approve the destination and data purpose; constrain "
+                    "or remove network access if it is not intended.",
                     Evidence(
                         network_evidence.source_file,
                         network_evidence.line_number,
                         network_evidence.symbol,
                         f"{network_evidence.detail}; {disclosure_detail}",
+                        network_evidence.path,
                     ),
                 )
             )
@@ -1830,7 +2537,8 @@ def analyze_contract(
     }
     records = reachable_functions(project, tool)
     path_scope = _path_scope_result(project, tool, path_parameters)
-    if path_scope.sinks:
+    path_guard_state_unresolved = bool(path_parameters) and any(unresolved_edges)
+    if path_scope.sinks and not path_guard_state_unresolved:
         unguarded_parameters = sorted(
             source
             for sink in path_scope.sinks
@@ -1844,6 +2552,26 @@ def analyze_contract(
                 sink.evidence.symbol,
             ),
         ).evidence
+        matching_capability = next(
+            (
+                item.evidence
+                for item in observed
+                if item.capability
+                in {Capability.FILESYSTEM_READ, Capability.FILESYSTEM_WRITE}
+                and item.evidence.source_file == evidence.source_file
+                and item.evidence.line_number == evidence.line_number
+                and item.evidence.symbol == evidence.symbol
+            ),
+            None,
+        )
+        if matching_capability is not None:
+            evidence = Evidence(
+                evidence.source_file,
+                evidence.line_number,
+                evidence.symbol,
+                evidence.detail,
+                matching_capability.path,
+            )
         findings.append(
             _finding(
                 "MSC103",

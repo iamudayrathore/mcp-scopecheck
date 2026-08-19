@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcp-scopecheck"
-version = "0.1.2"
+version = "0.2.0"
 description = "Static claim-versus-capability analysis for Python MCP servers"
 readme = "README.md"
 requires-python = ">=3.11"

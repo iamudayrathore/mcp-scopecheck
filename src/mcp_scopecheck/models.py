@@ -36,6 +36,29 @@ class Capability(StrEnum):
     PROCESS_EXECUTION = "process_execution"
 
 
+class AnalysisStatus(StrEnum):
+    """Trust state for the bounded static analysis."""
+
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    FAILED = "failed"
+
+
+class UnresolvedReason(StrEnum):
+    """Stable categories for project-local behavior that was not followed."""
+
+    AMBIGUOUS_LOCAL_TARGET = "ambiguous local target"
+    DYNAMIC_IMPORT = "dynamic import"
+    GRAPH_RESOURCE_BUDGET = "graph/resource budget"
+    HIGHER_ORDER_CALL = "higher-order call"
+    MISSING_LOCAL_TARGET = "missing local target"
+    UNRESOLVED_ARGUMENT_LINEAGE = "unresolved argument/guard lineage"
+    UNRESOLVED_REEXPORT = "unresolved re-export"
+    UNSUPPORTED_INSTANCE_DISPATCH = "unsupported instance/class dispatch"
+    WILDCARD_IMPORT = "wildcard import"
+    WRAPPER_INDIRECTION = "wrapper/decorator indirection"
+
+
 @dataclass(frozen=True)
 class Parameter:
     """A statically extracted Python tool parameter."""
@@ -58,6 +81,7 @@ class ToolDefinition:
     end_line: int
     parameters: tuple[Parameter, ...] = ()
     annotations: dict[str, Any] = field(default_factory=dict)
+    wrapper_expressions: tuple[tuple[int, str], ...] = ()
 
     @property
     def read_only_claimed(self) -> bool:
@@ -75,6 +99,15 @@ class ToolDefinition:
 
 
 @dataclass(frozen=True)
+class TraceStep:
+    """One stable source location in a capability reachability path."""
+
+    source_file: str
+    line_number: int
+    symbol: str
+
+
+@dataclass(frozen=True)
 class Evidence:
     """A source location supporting an observed capability or finding."""
 
@@ -82,6 +115,7 @@ class Evidence:
     line_number: int
     symbol: str
     detail: str
+    path: tuple[TraceStep, ...] = ()
 
     @property
     def location(self) -> str:
@@ -116,6 +150,67 @@ class Diagnostic:
     source_file: str
     message: str
     line_number: int = 0
+    status: AnalysisStatus = AnalysisStatus.FAILED
+
+
+@dataclass(frozen=True)
+class ResolvedCallEdge:
+    """A reachable, statically resolved project-local call."""
+
+    tool_name: str
+    source_file: str
+    line_number: int
+    caller: str
+    call_expression: str
+    target_file: str
+    target_symbol: str
+
+
+@dataclass(frozen=True)
+class UnresolvedCallEdge:
+    """A reachable call that may enter project-local code but was not resolved."""
+
+    tool_name: str
+    source_file: str
+    line_number: int
+    caller: str
+    call_expression: str
+    reason: UnresolvedReason
+    candidate: str = ""
+
+
+@dataclass(frozen=True)
+class PotentialRegistration:
+    """A statically visible MCP registration form outside the supported model."""
+
+    source_file: str
+    line_number: int
+    expression: str
+    reason: str
+    potential_tool_count: int = 1
+
+
+@dataclass(frozen=True)
+class AnalysisNotification:
+    """A non-vulnerability notification about analysis completeness."""
+
+    code: str
+    message: str
+    source_file: str = "<target>"
+    line_number: int = 0
+
+
+@dataclass
+class AnalysisCompleteness:
+    """Deterministic ledger of supported and unresolved analysis work."""
+
+    status: AnalysisStatus
+    supported_registrations: int
+    unresolved_registrations: int
+    resolved_edges: list[ResolvedCallEdge] = field(default_factory=list)
+    unresolved_edges: list[UnresolvedCallEdge] = field(default_factory=list)
+    potential_registrations: list[PotentialRegistration] = field(default_factory=list)
+    notifications: list[AnalysisNotification] = field(default_factory=list)
 
 
 @dataclass
@@ -128,6 +223,7 @@ class AuditReport:
     capabilities: dict[str, list[ObservedCapability]]
     findings: list[Finding]
     diagnostics: list[Diagnostic]
+    completeness: AnalysisCompleteness
     snapshot: str
 
     def findings_at_or_above(self, threshold: Severity) -> list[Finding]:

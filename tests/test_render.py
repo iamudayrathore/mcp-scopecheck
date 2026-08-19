@@ -10,6 +10,8 @@ from pathlib import Path
 
 from mcp_scopecheck.cli import main
 from mcp_scopecheck.models import (
+    AnalysisCompleteness,
+    AnalysisStatus,
     AuditReport,
     Capability,
     Diagnostic,
@@ -76,6 +78,11 @@ class RenderSecurityTests(unittest.TestCase):
             capabilities={tool.key: [capability]},
             findings=[finding],
             diagnostics=[Diagnostic("bad\u202efile.py", "parse\nerror\x00")],
+            completeness=AnalysisCompleteness(
+                status=AnalysisStatus.FAILED,
+                supported_registrations=1,
+                unresolved_registrations=0,
+            ),
             snapshot="0" * 64,
         )
 
