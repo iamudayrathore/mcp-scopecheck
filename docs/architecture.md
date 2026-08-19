@@ -148,20 +148,31 @@ local examples; they are not a general accuracy claim.
 
 `MSC102` is deterministic contract-mismatch detection that errs toward flagging.
 The reachable network call is always reported as an observed capability; the rule
-treats it as undisclosed unless the description clearly accounts for it. Isolated
-words such as `API`, `web`, `network`, `remote`, `URL`, or `endpoint`, generic
-verbs, unrelated named-service mentions, and documentation domains are all
-insufficient on their own. Disclosure requires an outbound action bound to an
+treats it as undisclosed unless the description clearly accounts for it.
+
+When the destination is statically known (a literal host is reachable), that
+evidence is authoritative: every reachable host must be accounted for by a named
+service whose registrable domain matches it, compared against a first-party
+domain allowlist so an attacker-controllable host (a typosquat, a subdomain
+prefix, or a user-content domain such as `*.github.io`) does not match. A host the
+description does not name is flagged even when the prose otherwise sounds like a
+disclosure, and one matching host does not clear another; a named service that
+matches no reachable host is a destination mismatch.
+
+When the destination is dynamic (no literal host), the verdict falls back to the
+description: disclosure requires an outbound action affirmatively bound to an
 external target (for example "download … from a URL", "upload … to a remote
-service", "makes an HTTP request"), or the reachable host or a matching service
-named in the description. Explicit offline/no-network wording is a contradiction
-when egress is reachable. When a literal URL is available, ScopeCheck records its
-host and compares named services by registrable domain, so a typosquat or
-subdomain-prefix host is a mismatch rather than a match. Because over-flagging a
-disclosed call is a safe error and silent hidden egress is not, ambiguous wording
-is flagged, not suppressed. This does not establish endpoint intent, validate the
-description's truthfulness, or understand paraphrases beyond the documented
-patterns.
+service", "makes an HTTP request", "sends an email"), not negated within its
+sentence. Isolated words such as `API`, `web`, `network`, `remote`, `URL`, or
+`endpoint`, generic verbs (including "sends a message/notification"), unrelated
+named-service mentions, and documentation domains are all insufficient on their
+own. Explicit offline/no-network wording, sentence-scoped, is a contradiction when
+egress is reachable.
+
+Because over-flagging a disclosed call is a safe, correctable error and silent
+hidden egress is not, ambiguous wording is flagged, not suppressed. This does not
+establish endpoint intent, validate the description's truthfulness, or understand
+paraphrases beyond the documented patterns.
 
 MCP tool annotations are untrusted declarations, not enforcement. ScopeCheck
 accepts the Python-style snake_case and protocol-style camelCase spellings for

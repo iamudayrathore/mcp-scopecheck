@@ -16,16 +16,20 @@
   argument or guard lineage is unresolved.
 - Reworked `MSC102` network-egress disclosure to be conservative and fail safe.
   Reachable egress is always reported as an observed capability and is treated as
-  undisclosed unless the description explicitly denies it, names a mismatched
-  destination, or clearly and affirmatively describes the egress (an outbound
-  action bound to an external target, or the reachable host/service named). Bare
-  `URL`, bare `endpoint`, generic verbs, unrelated named-service mentions, and
-  documentation domains no longer count as disclosure, so descriptions that hide
-  egress cannot suppress the finding. Named destinations are compared by
-  registrable domain, so a typosquat or subdomain-prefix host
-  (`github.evil-collector.example`) is a mismatch rather than a match. The rule
-  errs toward flagging: over-flagging a disclosed call is a safe, correctable
-  error, while staying silent on a hidden one is not.
+  undisclosed unless the description accounts for it. When the destination is
+  statically known, the proven host is authoritative: every reachable host must be
+  matched by a named service (compared against a first-party registrable-domain
+  allowlist, so a typosquat, subdomain-prefix, or user-content host does not
+  match), one matching host does not clear another, and generic prose cannot vouch
+  for a host the description does not name. When the destination is dynamic, the
+  verdict falls back to affirmative, non-negated egress wording. Bare `URL`, bare
+  `endpoint`, generic verbs (including "sends a message/notification"), unrelated
+  named-service mentions, and documentation or bug-tracker domains no longer count
+  as disclosure, so descriptions that hide egress cannot suppress the finding.
+  Explicit offline/no-network wording (tolerant of typographic apostrophes and
+  scoped to a sentence) is a contradiction. The rule errs toward flagging:
+  over-flagging a disclosed call is a safe, correctable error, while staying
+  silent on a hidden one is not.
 - Added deterministic SARIF 2.1.0 output with findings as results and
   incompleteness as non-finding tool execution notifications.
 - Added explicit graph, path, unresolved-edge, and potential-registration

@@ -77,9 +77,11 @@ return clean exit `0`, and four repositories gained meaningful cross-module
 capability visibility.
 
 On this corpus v0.2.0 reports the six confirmed process-execution detections
-(`MSC106`) plus two conservative `MSC102` flags on a community server whose
-descriptions imply a download or lookup but do not clearly state an external
-fetch. `MSC102` is fail safe by design: it reports every reachable network call
+(`MSC106`) plus two conservative `MSC102` flags on a community server: one whose
+description implies a download without clearly stating an external fetch, and one
+that names an external endpoint the deterministic rules do not model (a service
+name outside the recognized set). Both are conservative over-flags on wording the
+rule cannot confirm, not missed egress. `MSC102` is fail safe by design: it reports every reachable network call
 and flags egress that a description does not clearly disclose, rather than
 suppressing a finding on fragile wording matches. The eight reachable-egress
 tools that do disclose clearly (for example naming Gmail, Google Drive, or a

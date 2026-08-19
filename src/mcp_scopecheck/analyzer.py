@@ -206,8 +206,10 @@ KNOWN_DESTINATIONS = frozenset(_SERVICE_NAMES)
 _SERVICE_ALT = "|".join(_SERVICE_NAMES)
 
 # Sentence segmentation used for negation scoping. Newlines are boundaries so an
-# unpunctuated bullet/argument block does not merge into one span.
-_SENTENCE_SPLIT = re.compile(r"[.!?;\n\r]+")
+# unpunctuated bullet/argument block does not merge into one span; terminal
+# punctuation splits only when followed by whitespace or end of text, so a dotted
+# hostname or version number is not fragmented mid-token.
+_SENTENCE_SPLIT = re.compile(r"[.!?;]+(?=\s)|[.!?;]+$|[\n\r]+")
 _NEGATION = re.compile(
     r"\b(?:not|never|no|without|cannot|can't|won't|will\s+not|shall\s+not|"
     r"does\s+not|doesn't|do\s+not|don't|didn't|isn't|aren't|n't)\b",
@@ -225,9 +227,12 @@ _DENIAL_VERB = (
     r"send(?:s|ing)?|sent|talk(?:s|ed|ing)?|transmit(?:s|ted|ting)?|"
     r"upload(?:s|ed|ing)?|us(?:e|es|ed|ing))"
 )
+# Denial targets are deliberately narrow: only unambiguously network-scoped words
+# and explicit hostnames. Generic terms such as "url", "server", "endpoint", or a
+# bare service name are excluded so that unrelated negations ("does not use the url
+# parser", "does not delete contacts on the server") are not misread as denials.
 _DENIAL_TARGET = (
-    r"(?:internet|network|remote|external|online|endpoint|server|cloud|web|url|"
-    r"outbound|" + _SERVICE_ALT + r")"
+    r"(?:internet|network(?:s)?|remote|external|outbound|(?:[a-z0-9-]+\.)+[a-z]{2,})"
 )
 NETWORK_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
@@ -291,8 +296,7 @@ NETWORK_DISCLOSURE_PATTERNS: tuple[re.Pattern[str], ...] = (
         re.I,
     ),
     re.compile(
-        r"\bsends?\s+(?:an?\s+|the\s+|out\s+)?(?:email|message|notification|"
-        r"webhook|payload)\b",
+        r"\bsends?\s+(?:an?\s+|the\s+|out\s+)?(?:e[- ]?mails?|webhooks?)\b",
         re.I,
     ),
     re.compile(
@@ -350,13 +354,17 @@ def _poisoning_indicator(description: str) -> _DescriptionIndicator | None:
 # list, so a typosquat or subdomain-prefix host (github.evil-collector.example,
 # gmail-x.attacker.example) never matches while api.github.com, hooks.slack.com,
 # and gmail.googleapis.com do.
+# Only first-party API/service domains. User-content and redirect domains
+# (github.io, *.githubusercontent.com, googleusercontent.com, discord.gg) are
+# excluded: they serve attacker-controllable content, so a host on one of them
+# must not be auto-accepted as the named service.
 _SERVICE_DOMAINS: dict[str, frozenset[str]] = {
-    "discord": frozenset({"discord.com", "discordapp.com", "discord.gg"}),
-    "github": frozenset({"github.com", "github.io", "githubusercontent.com"}),
-    "gitlab": frozenset({"gitlab.com", "gitlab.io"}),
-    "gmail": frozenset({"gmail.com", "google.com", "googleapis.com", "googleusercontent.com"}),
-    "google": frozenset({"google.com", "googleapis.com", "googleusercontent.com", "gstatic.com"}),
-    "slack": frozenset({"slack.com", "slack-edge.com", "slackb.com"}),
+    "discord": frozenset({"discord.com", "discordapp.com"}),
+    "github": frozenset({"github.com"}),
+    "gitlab": frozenset({"gitlab.com"}),
+    "gmail": frozenset({"gmail.com", "google.com", "googleapis.com"}),
+    "google": frozenset({"google.com", "googleapis.com", "gstatic.com"}),
+    "slack": frozenset({"slack.com"}),
 }
 
 
@@ -373,10 +381,17 @@ def _host_matches_service(host: str, service: str) -> bool:
     return _registrable_domain(host) in _SERVICE_DOMAINS.get(service, frozenset())
 
 
+def _normalize_apostrophes(text: str) -> str:
+    """Fold typographic apostrophes to ASCII so negation and denial matching is
+    not defeated by a curly quote in "doesn't"/"won't"."""
+
+    return text.replace("’", "'").replace("‘", "'").replace("ʼ", "'")
+
+
 def _sentences(description: str) -> list[str]:
     return [
         " ".join(fragment.split())
-        for fragment in _SENTENCE_SPLIT.split(description)
+        for fragment in _SENTENCE_SPLIT.split(_normalize_apostrophes(description))
         if fragment.strip()
     ]
 
@@ -386,8 +401,7 @@ def _assess_network_disclosure(
     static_hosts: Iterable[str] = (),
 ) -> _DisclosureAssessment:
     sentences = _sentences(description)
-    normalized = " ".join(description.split())
-    normalized_lower = normalized.lower()
+    normalized = " ".join(_normalize_apostrophes(description).split())
 
     # 1. Explicit denial of network access, scoped to a sentence -> contradiction.
     for sentence in sentences:
@@ -408,28 +422,35 @@ def _assess_network_disclosure(
         if re.search(rf"\b{service}\b", normalized, re.I)
     )
 
-    # 2. A named destination that matches no reachable host -> mismatch.
-    if hosts and described and not any(
-        _host_matches_service(host, service) for service in described for host in hosts
-    ):
+    # 2. When the reachable destination is statically known, it is authoritative:
+    # every resolved host must be accounted for by a named service whose
+    # registrable domain matches it. Generic prose cannot vouch for a specific
+    # host the description does not name, and one matching host cannot clear the
+    # others.
+    if hosts:
+        unaccounted = [
+            host
+            for host in hosts
+            if not any(_host_matches_service(host, service) for service in described)
+        ]
+        if not unaccounted:
+            return _DisclosureAssessment(
+                True, "description names the reachable destination(s)"
+            )
+        if described:
+            return _DisclosureAssessment(
+                False,
+                f"described destination {described!r} does not match "
+                f"static host(s) {unaccounted!r}",
+            )
         return _DisclosureAssessment(
             False,
-            f"described destination {described!r} does not match "
-            f"static host(s) {list(hosts)!r}",
+            f"a specific external host {unaccounted!r} is reachable but the "
+            "description names no destination",
         )
 
-    # 3. Strongest disclosure: the description names the reachable destination.
-    if hosts and (
-        any(host in normalized_lower for host in hosts)
-        or any(
-            _host_matches_service(host, service)
-            for service in described
-            for host in hosts
-        )
-    ):
-        return _DisclosureAssessment(True, "description names the reachable destination")
-
-    # 4. Clear affirmative egress phrasing that is not negated within its sentence.
+    # 3. No statically known host (dynamic destination): fall back to clear
+    # affirmative egress phrasing that is not negated within its sentence.
     for sentence in sentences:
         if _NEGATION.search(sentence):
             continue
@@ -441,7 +462,7 @@ def _assess_network_disclosure(
                     f"description states external network egress: {match.group(0)!r}",
                 )
 
-    # 5. Fail safe: reachable egress is not clearly disclosed.
+    # 4. Fail safe: reachable egress is not clearly disclosed.
     return _DisclosureAssessment(
         False,
         "description does not clearly disclose the reachable network egress",
