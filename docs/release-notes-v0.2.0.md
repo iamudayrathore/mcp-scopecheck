@@ -79,8 +79,9 @@ capability visibility.
 On this corpus v0.2.0 reports the six confirmed process-execution detections
 (`MSC106`) plus ten `MSC102` network-egress flags — all ten reachable-egress
 tools in the corpus (eight in one Google Workspace server, two in a YouTube
-server). Every one builds its request URL at runtime through a client library, so
-the destination cannot be statically resolved and the tool is flagged for review
+server). Every one builds its request URL through a client library or an
+interpolated string, so the destination is not a plain string literal ScopeCheck's
+endpoint extractor can read, and the tool is flagged for review
 rather than trusted. `MSC102` cannot be suppressed by a tool's prose by design;
 the ten flags are the deliberate recall-over-precision consequence of that choice,
 not missed egress. None is a false negative: each names a genuinely reachable

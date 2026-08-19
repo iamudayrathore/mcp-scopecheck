@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import ipaddress
 import re
 from collections import deque
 from collections.abc import Iterable
@@ -205,9 +206,11 @@ BENIGN_SECURITY_DISCUSSION = re.compile(
 # for review, never suppressed. An explicit denial is reported as a contradiction;
 # denial detection is best-effort, because a missed denial still falls through to a
 # flag rather than to silence.
-_SERVICE_NAMES = ("discord", "github", "gitlab", "gmail", "google", "slack")
+# Discord is intentionally absent: its webhook exfil endpoint shares the discord.com
+# host with its API, so a reachable host cannot distinguish the two — every Discord
+# egress is therefore flagged rather than matched.
+_SERVICE_NAMES = ("github", "gitlab", "gmail", "google", "slack")
 KNOWN_DESTINATIONS = frozenset(_SERVICE_NAMES)
-_SERVICE_ALT = "|".join(_SERVICE_NAMES)
 
 # Sentence segmentation used for negation scoping. Newlines are boundaries so an
 # unpunctuated bullet/argument block does not merge into one span; terminal
@@ -297,20 +300,23 @@ class _NetworkDestinations:
 
 
 def _is_local_host(host: str) -> bool:
-    """True for loopback, link-local, and RFC1918/ULA private hosts."""
+    """True only for the localhost name and genuine loopback/private IP literals.
+
+    Parses the host as an IP address so that a hostname merely resembling a private
+    range ("10.example.com", "127.0.0.1.evil.com") is treated as external, not
+    dropped. Link-local addresses (including the 169.254.169.254 cloud-metadata
+    endpoint) are deliberately NOT treated as local, so egress to them is flagged.
+    """
 
     name = host.lower().strip(".")
-    if name in {"localhost", "0.0.0.0", "::1", "::"} or name.endswith(".localhost"):
+    if name == "localhost" or name.endswith(".localhost"):
         return True
-    if name.startswith(("127.", "10.", "192.168.", "169.254.")):
-        return True
-    if name.startswith("172."):
-        octet = name.split(".")
-        if len(octet) >= 2 and octet[1].isdigit() and 16 <= int(octet[1]) <= 31:
-            return True
-    if name.startswith(("fc", "fd")) and ":" in name:  # IPv6 unique-local
-        return True
-    return False
+    candidate = name[1:-1] if name.startswith("[") and name.endswith("]") else name
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        return False
+    return address.is_loopback or (address.is_private and not address.is_link_local)
 
 
 def _poisoning_indicator(description: str) -> _DescriptionIndicator | None:
@@ -346,13 +352,27 @@ def _poisoning_indicator(description: str) -> _DescriptionIndicator | None:
 # excluded: they serve attacker-controllable content, so a host on one of them
 # must not be auto-accepted as the named service.
 _SERVICE_DOMAINS: dict[str, frozenset[str]] = {
-    "discord": frozenset({"discord.com", "discordapp.com"}),
     "github": frozenset({"github.com"}),
     "gitlab": frozenset({"gitlab.com"}),
     "gmail": frozenset({"gmail.com", "google.com", "googleapis.com"}),
     "google": frozenset({"google.com", "googleapis.com", "gstatic.com"}),
     "slack": frozenset({"slack.com"}),
 }
+
+# Hosts that sit on a first-party registrable domain but serve arbitrary
+# user-controlled endpoints (buckets, gists, deployed scripts, incoming webhooks).
+# Naming the service does not vouch for egress to these — an attacker can host a
+# drop there — so they never satisfy a service match and are always flagged.
+_UNTRUSTED_SERVICE_HOSTS = (
+    "storage.googleapis.com",
+    "firebasestorage.googleapis.com",
+    "script.google.com",
+    "sites.google.com",
+    "docs.google.com",
+    "forms.gle",
+    "gist.github.com",
+    "hooks.slack.com",
+)
 
 
 def _registrable_domain(host: str) -> str:
@@ -363,8 +383,12 @@ def _registrable_domain(host: str) -> str:
 
 
 def _host_matches_service(host: str, service: str) -> bool:
-    """True when a reachable host's registrable domain belongs to a named service."""
+    """True when a reachable host's registrable domain belongs to a named service
+    and the host is not a user-content/webhook endpoint that anyone can target."""
 
+    host = host.lower()
+    if any(host == deny or host.endswith(f".{deny}") for deny in _UNTRUSTED_SERVICE_HOSTS):
+        return False
     return _registrable_domain(host) in _SERVICE_DOMAINS.get(service, frozenset())
 
 
@@ -387,6 +411,19 @@ def _assess_network_disclosure(
     description: str,
     destinations: _NetworkDestinations,
 ) -> _DisclosureAssessment:
+    external = destinations.external
+
+    # 0. Purely local/loopback egress is not external network access, so a "never
+    # uses the network" denial about it is truthful rather than a contradiction.
+    if not external and not destinations.unresolved:
+        if destinations.local:
+            return _DisclosureAssessment(
+                True, "reachable network calls target only local or loopback hosts"
+            )
+        return _DisclosureAssessment(
+            False, "reachable network egress has no statically resolved destination"
+        )
+
     sentences = _sentences(description)
 
     # 1. Explicit denial of network access, scoped to a sentence -> contradiction.
@@ -413,7 +450,6 @@ def _assess_network_disclosure(
         )
     )
 
-    external = destinations.external
     if external:
         unaccounted = [
             host
@@ -442,20 +478,12 @@ def _assess_network_disclosure(
             )
         return _DisclosureAssessment(True, "description names the reachable destination(s)")
 
-    # No external host resolved to a literal. A dynamic/computed destination cannot
-    # be verified, so it is flagged, never suppressed by prose.
-    if destinations.unresolved:
-        return _DisclosureAssessment(
-            False,
-            "the reachable network destination is not statically resolvable and is "
-            "not disclosed",
-        )
-    if destinations.local:
-        return _DisclosureAssessment(
-            True, "reachable network calls target only local or loopback hosts"
-        )
+    # Reached only when there is no external host but a dynamic/computed destination
+    # remains. It cannot be verified, so it is flagged, never suppressed by prose.
     return _DisclosureAssessment(
-        False, "reachable network egress has no statically resolved destination"
+        False,
+        "the reachable network destination is not statically resolvable and is "
+        "not disclosed",
     )
 
 
