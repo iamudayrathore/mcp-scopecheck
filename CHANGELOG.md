@@ -14,22 +14,20 @@
   code capabilities with shortest explainable source paths.
 - Kept `MSC105` same-function and suppressed `MSC103` when cross-boundary
   argument or guard lineage is unresolved.
-- Reworked `MSC102` network-egress disclosure to be conservative and fail safe.
-  Reachable egress is always reported as an observed capability and is treated as
-  undisclosed unless the description accounts for it. When the destination is
-  statically known, the proven host is authoritative: every reachable host must be
-  matched by a named service (compared against a first-party registrable-domain
-  allowlist, so a typosquat, subdomain-prefix, or user-content host does not
-  match), one matching host does not clear another, and generic prose cannot vouch
-  for a host the description does not name. When the destination is dynamic, the
-  verdict falls back to affirmative, non-negated egress wording. Bare `URL`, bare
-  `endpoint`, generic verbs (including "sends a message/notification"), unrelated
-  named-service mentions, and documentation or bug-tracker domains no longer count
-  as disclosure, so descriptions that hide egress cannot suppress the finding.
-  Explicit offline/no-network wording (tolerant of typographic apostrophes and
-  scoped to a sentence) is a contradiction. The rule errs toward flagging:
-  over-flagging a disclosed call is a safe, correctable error, while staying
-  silent on a hidden one is not.
+- Reworked `MSC102` network-egress disclosure so a tool's prose can never
+  suppress the finding — only verifiable evidence can. Reachable egress is always
+  reported as an observed capability, and MSC102 treats it as undisclosed unless
+  the reachable destination is a statically resolved external host whose
+  registrable domain matches a service the description names (compared against a
+  first-party allowlist, so a typosquat, subdomain-prefix, or user-content host
+  does not match, and one matching host never clears another). A dynamic or
+  computed destination that cannot be resolved statically is always flagged for
+  review, never vouched for by wording. Purely local/loopback destinations
+  (`localhost`, `127.0.0.1`, RFC1918/ULA) are not treated as external egress. An
+  explicit offline/no-network denial is reported as a contradiction; denial
+  detection is best-effort, because a missed denial still flags rather than
+  suppresses. This is a deliberate recall-over-precision stance: a reachable call
+  whose destination cannot be verified is surfaced for a human to confirm.
 - Added deterministic SARIF 2.1.0 output with findings as results and
   incompleteness as non-finding tool execution notifications.
 - Added explicit graph, path, unresolved-edge, and potential-registration

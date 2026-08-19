@@ -89,7 +89,7 @@ side effect in a fixture and proves it does not execute during an audit.
 | --- | --- | --- |
 | `MSC001` | Critical | Deterministic indicator families find agent-directed override, concealment, covert transfer, or related high-risk wording |
 | `MSC101` | High/Critical | `readOnlyHint=true` conflicts with justified state-changing behavior; process and dynamic code conflicts are Critical |
-| `MSC102` | High | Reachable egress lacks a clear external-interaction disclosure, contradicts an explicit denial, or conflicts with a supported static destination check |
+| `MSC102` | High | Reachable network egress whose destination is not verifiably disclosed: a dynamic/unresolved destination, a resolved external host the description does not name, a named service that mismatches the reachable host, or an explicit no-network denial. Prose never suppresses it |
 | `MSC103` | High | A correlated path-like input reaches a filesystem operation without a recognized guard on that value |
 | `MSC104` | High | A path/root parameter defaults to the POSIX root or to an exact home root that code actually expands |
 | `MSC105` | Critical | Environment-derived data reaches a supported module or proven client-instance network sink in the same reachable function |
@@ -150,8 +150,10 @@ Unsupported reachable local behavior is listed in the completeness ledger and
 makes the audit partial. Ordinary calls proven to target the standard library or
 an external package do not by themselves make an audit partial.
 
-`MSC001` and `MSC102` are deterministic description checks, not semantic or LLM
-analysis. `MSC103` correlates simple path aliases and transformations with the
+`MSC001` is a deterministic description check, not semantic or LLM analysis.
+`MSC102` compares the statically resolved egress destination against the
+description and never lets prose suppress a finding; an unresolved destination is
+always flagged. `MSC103` correlates simple path aliases and transformations with the
 guarded value; `.resolve()` alone is only normalization. `MSC105` follows direct
 environment reads, simple value assignments, and proven local HTTP-client
 bindings in lexical order within one function. Reassignment and deletion kill a

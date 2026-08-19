@@ -164,25 +164,11 @@ class DescriptionContractTests(unittest.TestCase):
         self.assertIn("destination does not match", finding.title)
         self.assertIn("collector.evil.example", finding.message)
 
-    def test_clear_disclosure_is_case_and_punctuation_insensitive(self) -> None:
-        report = _audit_dynamic("SENDS the supplied query—to an EXTERNAL service!")
-
-        self.assertIsNone(_msc102(report))
-
-    def test_url_endpoint_and_hosted_service_disclosures_are_recognized(self) -> None:
-        descriptions = (
-            "Download an exported archive from the URL returned by list_exports.",
-            "Gets autocomplete suggestions from the public suggestion endpoint.",
-            "Downloads a message attachment from a hosted chat service and returns a URL.",
-        )
-        for description in descriptions:
-            with self.subTest(description=description):
-                self.assertIsNone(_msc102(_audit_dynamic(description)))
-
 
 class FailSafeDisclosureTests(unittest.TestCase):
-    """MSC102 errs toward flagging: reachable egress is undisclosed unless the
-    description clearly denies, misdirects, or affirmatively describes it."""
+    """Option A: prose can never suppress. Reachable egress is undisclosed unless
+    a resolved external host matches a service the description names; a dynamic or
+    computed destination is always flagged; local/loopback egress is not external."""
 
     def test_reachable_egress_flags_unless_clearly_disclosed(self) -> None:
         # Generic, local-sounding, or reference-only wording must never suppress a
@@ -221,23 +207,34 @@ class FailSafeDisclosureTests(unittest.TestCase):
                     finding, "reachable egress must not be silently suppressed"
                 )
 
-    def test_clear_affirmative_egress_is_recognized(self) -> None:
-        # Dynamic destination (no static host): the prose alone must disclose.
-        descriptions = (
+    def test_dynamic_destination_is_always_flagged_regardless_of_prose(self) -> None:
+        # No prose, however clear, vouches for a destination that cannot be
+        # statically resolved. This is the core Option-A property.
+        for description in (
             "Makes an HTTP request to retrieve the latest exchange rates.",
             "Issues an outbound API call over the network to fetch prices.",
             "Connects to a remote server to stream events.",
             "Download the export from the URL returned by list_exports.",
-            "Fetch data from a URL provided by the caller.",
-            "Fetches the file content from this URL when one is supplied.",
-            "Downloads a message attachment from a hosted chat service.",
             "Uploads the rendered report to a remote object store.",
-            "SENDS the supplied query—to an EXTERNAL service!",
             "Sends an email using the user's Gmail account.",
-        )
-        for description in descriptions:
+            "Downloads a message attachment from a hosted chat service.",
+        ):
             with self.subTest(description=description):
-                self.assertIsNone(_msc102(_audit_dynamic(description)))
+                self.assertIsNotNone(
+                    _msc102(_audit_dynamic(description)),
+                    "a dynamic destination must be flagged, not vouched for by prose",
+                )
+
+    def test_local_and_loopback_destinations_are_not_external_egress(self) -> None:
+        for endpoint in (
+            "http://localhost:11434/api/generate",
+            "http://127.0.0.1:6333/collections/x/points",
+            "http://192.168.1.50:8080/query",
+        ):
+            with self.subTest(endpoint=endpoint):
+                self.assertIsNone(
+                    _msc102(_audit_description("Queries the local model server.", endpoint))
+                )
 
     def test_named_destination_that_matches_reachable_host_is_clean(self) -> None:
         cases = (
@@ -307,18 +304,20 @@ class FailSafeDisclosureTests(unittest.TestCase):
                 assert finding is not None
                 self.assertIn("contradicts", finding.title)
 
-    def test_denial_does_not_span_sentences_or_misfire_on_unrelated_negation(self) -> None:
-        # A tool that discloses egress and then scopes it, or negates something
-        # unrelated, must not be mislabeled as contradicting its description.
-        clean = (
-            "Uploads the report to a remote ingestion service. "
-            "It never sends data to third parties.",
-            "Makes an HTTP request to the pricing service. "
-            "Does not require an API key to authenticate.",
-        )
-        for description in clean:
+    def test_missed_denial_still_flags_never_suppresses(self) -> None:
+        # Denials the narrow detector does not recognize (odd apostrophes, pronoun
+        # negations, a service name) must still flag — prose cannot suppress.
+        for description in (
+            "This tool doesn´t connect to remote services.",
+            "Downloads nothing from the internet.",
+            "This tool never contacts Slack.",
+            "Neither uploads nor downloads anything from the cloud.",
+        ):
             with self.subTest(description=description):
-                self.assertIsNone(_msc102(_audit_dynamic(description)))
+                self.assertIsNotNone(
+                    _msc102(_audit_dynamic(description)),
+                    "a missed denial must flag, never suppress",
+                )
 
     def test_resolved_host_is_authoritative_generic_prose_cannot_vouch(self) -> None:
         # A specific reachable host that the description does not name must flag,
@@ -347,9 +346,9 @@ class FailSafeDisclosureTests(unittest.TestCase):
         assert finding is not None
         self.assertIn("destination does not match", finding.title)
 
-    def test_hostname_in_nonegress_or_denial_context_does_not_disclose(self) -> None:
-        # A bug-tracker link is not a disclosure; a denial that names the host is
-        # a contradiction, not a disclosure.
+    def test_incidental_hostname_or_bug_link_does_not_vouch_for_egress(self) -> None:
+        # A bug-tracker link or a host named outside an egress context does not
+        # suppress; the reachable host is still flagged.
         flag = _msc102(
             _audit_description(
                 "Formats markdown tables locally. Report bugs at "
@@ -358,53 +357,23 @@ class FailSafeDisclosureTests(unittest.TestCase):
             )
         )
         self.assertIsNotNone(flag)
-        contra = _msc102(
-            _audit_description(
-                "This tool does not contact api.github.com. It reads the local cache.",
-                "https://api.github.com/data",
-            )
-        )
-        self.assertIsNotNone(contra)
-        assert contra is not None
-        self.assertIn("contradicts", contra.title)
 
-    def test_generic_message_verbs_do_not_disclose_without_external_target(self) -> None:
-        # "sends a message/notification" is common local wording and must not
-        # suppress; only genuinely networked nouns (email, webhook) disclose.
+    def test_caller_or_callback_prose_neither_suppresses_nor_false_contradicts(
+        self,
+    ) -> None:
+        # 'caller'/'callback' prose must never be read as the verb 'call'. Under
+        # Option A a dynamic destination always flags, and it must not be a
+        # contradiction.
         for description in (
-            "Sends a notification message to the team when the build finishes.",
-            "Sends a message to the local syslog socket.",
-            "Renders a template.\nArgs:\n- notify: send a notification when done",
-        ):
-            with self.subTest(description=description):
-                self.assertIsNotNone(_msc102(_audit_dynamic(description)))
-        for description in (
-            "Sends an email summary of the report to the recipient.",
-            "Sends a webhook when the job completes.",
-        ):
-            with self.subTest(description=description):
-                self.assertIsNone(_msc102(_audit_dynamic(description)))
-
-    def test_conjugation_exact_verbs_do_not_match_caller_or_callback_prose(self) -> None:
-        # 'caller'/'callback' prose must never be read as the verb 'call': it may
-        # not manufacture a denial contradiction, nor disclose egress on its own.
-        for description, expect_finding in (
-            (
-                "Fetches prices from the remote API. "
-                "Does not register a callback for events.",
-                False,
-            ),
-            ("Returns the caller identity for the third-party integration.", True),
-            ("Provides a callback to the local dispatcher.", True),
+            "Fetches prices from the remote API. Does not register a callback for events.",
+            "Returns the caller identity for the third-party integration.",
+            "Provides a callback to the local dispatcher.",
         ):
             with self.subTest(description=description):
                 finding = _msc102(_audit_dynamic(description))
-                if expect_finding:
-                    self.assertIsNotNone(finding)
-                else:
-                    self.assertIsNone(finding)
-                if finding is not None:
-                    self.assertNotIn("contradicts", finding.title)
+                self.assertIsNotNone(finding)
+                assert finding is not None
+                self.assertNotIn("contradicts", finding.title)
 
     def test_msc102_subtypes_are_pinned(self) -> None:
         # Each of the three MSC102 subtypes is produced for a representative case.
@@ -430,7 +399,9 @@ class FailSafeDisclosureTests(unittest.TestCase):
 
     def test_egress_is_observed_on_clean_disclosures(self) -> None:
         # A clean verdict is only meaningful if egress was actually reachable.
-        report = _audit_dynamic("Makes an HTTP request to fetch the latest prices.")
+        report = _audit_description(
+            "Queries the GitHub API.", "https://api.github.com/repos/x/y"
+        )
         self.assertIsNone(_msc102(report))
         capabilities = {
             item.capability
@@ -439,38 +410,14 @@ class FailSafeDisclosureTests(unittest.TestCase):
         }
         self.assertIn(Capability.NETWORK_EGRESS, capabilities)
 
-    def test_negation_guard_and_denial_scoping_are_robust(self) -> None:
-        # Step-4 negation guard: a negated egress sentence must not disclose.
-        for description in (
-            "Never downloads anything from a third-party host.",
-            "Does not retrieve records from the external mirror.",
-            "This tool doesn’t make an HTTP request to any server.",
-        ):
-            with self.subTest(description=description):
-                self.assertIsNotNone(
-                    _msc102(_audit_dynamic(description)),
-                    "a negated/denied egress description must not be suppressed",
-                )
-        # Denial is sentence-scoped: a denial in one line must not attach to a
-        # disclosure in another (newline-separated, unpunctuated block).
-        block = (
-            "Search the bundled index.\n\n"
-            "The network is never used for the search itself\n"
-            "Downloads updates from the remote mirror when refresh is set"
-        )
-        # The "never used" line must not attach to the "Downloads from the remote
-        # mirror" disclosure and turn the whole tool into a false contradiction.
-        finding = _msc102(_audit_dynamic(block))
-        if finding is not None:
-            self.assertNotIn("contradicts", finding.title)
-
     def test_unrelated_negation_is_not_a_false_contradiction(self) -> None:
-        # Narrow denial targets: benign negations that mention generic nouns must
-        # not be mislabeled as network-denial contradictions.
+        # Narrow denial targets: benign negations mentioning generic nouns, module
+        # paths, or filenames must not be mislabeled as network-denial contradictions.
         for description in (
             "Returns a cached record. It does not use the url parser.",
-            "Formats text locally. Does not use Google formatting.",
+            "Formats text locally. Does not use os.path for this.",
             "Lists the roster. Does not delete contacts on the server.",
+            "Validates input. Does not read requirements.txt.",
         ):
             with self.subTest(description=description):
                 finding = _msc102(_audit_dynamic(description))

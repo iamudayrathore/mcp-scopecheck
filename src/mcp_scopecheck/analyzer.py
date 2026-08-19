@@ -194,13 +194,17 @@ BENIGN_SECURITY_DISCUSSION = re.compile(
 
 # --- MSC102 network-egress disclosure (conservative, fail-safe) ---
 # ScopeCheck proves reachable network egress from the call graph; that fact is
-# always reported as an observed capability. Deciding whether a natural-language
-# description *discloses* that egress cannot be done reliably by pattern matching,
-# so this check errs toward flagging: reachable egress is treated as undisclosed
-# unless the description explicitly denies it, names a mismatched destination, or
-# clearly and affirmatively describes the egress. Over-flagging a call that was
-# in fact disclosed is a safe, correctable error a reader dismisses at a glance;
-# staying silent on a hidden call is the failure a security scanner must avoid.
+# always reported as an observed capability. Whether a natural-language description
+# *discloses* that egress cannot be decided reliably from prose — three review
+# rounds showed every prose-suppression heuristic is defeatable in both directions
+# — so MSC102 never lets a description suppress a finding. Egress is treated as
+# undisclosed unless the ONE non-evadable signal holds: the reachable destination
+# is a statically resolved external host whose registrable domain matches a service
+# the description names. Purely local/loopback destinations are not external egress.
+# A destination that cannot be resolved statically (dynamic/computed URL) is flagged
+# for review, never suppressed. An explicit denial is reported as a contradiction;
+# denial detection is best-effort, because a missed denial still falls through to a
+# flag rather than to silence.
 _SERVICE_NAMES = ("discord", "github", "gitlab", "gmail", "google", "slack")
 KNOWN_DESTINATIONS = frozenset(_SERVICE_NAMES)
 _SERVICE_ALT = "|".join(_SERVICE_NAMES)
@@ -227,13 +231,13 @@ _DENIAL_VERB = (
     r"send(?:s|ing)?|sent|talk(?:s|ed|ing)?|transmit(?:s|ted|ting)?|"
     r"upload(?:s|ed|ing)?|us(?:e|es|ed|ing))"
 )
-# Denial targets are deliberately narrow: only unambiguously network-scoped words
-# and explicit hostnames. Generic terms such as "url", "server", "endpoint", or a
-# bare service name are excluded so that unrelated negations ("does not use the url
-# parser", "does not delete contacts on the server") are not misread as denials.
-_DENIAL_TARGET = (
-    r"(?:internet|network(?:s)?|remote|external|outbound|(?:[a-z0-9-]+\.)+[a-z]{2,})"
-)
+# Denial targets are deliberately narrow: only unambiguously network-scoped words.
+# Generic terms ("url", "server", "endpoint"), bare service names, dotted module
+# paths ("os.path"), and filenames ("requirements.txt") are excluded so unrelated
+# negations are not misread as denials. A missed denial is not a safety problem
+# under this rule: it simply flags the egress as undisclosed instead of as a
+# contradiction.
+_DENIAL_TARGET = r"(?:internet|networks?|remote|external|outbound)"
 NETWORK_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"\b(?:never|not|cannot|can't|won't|will\s+not|shall\s+not|"
@@ -257,54 +261,6 @@ NETWORK_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
 )
 
-# High-precision affirmative descriptions of external network egress. A benign,
-# local-only tool essentially never contains these; matching one (when not
-# negated in the same sentence) is treated as clear disclosure.
-NETWORK_DISCLOSURE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bover\s+the\s+(?:internet|network|wire|web)\b", re.I),
-    re.compile(
-        r"\b(?:make|makes|making|made|issue|issues|issuing|issued|"
-        r"perform|performs|performing|performed|open|opens|opening|opened|"
-        r"send|sends|sending|sent)\s+(?:an?\s+|a\s+new\s+|out\s+)?"
-        r"(?:https?|network|web|rest|api|outbound|remote|external|"
-        r"outgoing)\s+(?:requests?|calls?|connections?|quer(?:y|ies))\b",
-        re.I,
-    ),
-    re.compile(
-        r"\b(?:connect|connects|connecting|connected)\s+to\s+"
-        r"(?:a\s+|an\s+|the\s+)?(?:remote|external|internet|cloud|" + _SERVICE_ALT + r")\b",
-        re.I,
-    ),
-    re.compile(
-        r"\b(?:download|downloads|downloading|downloaded|fetch|fetches|fetching|"
-        r"fetched|retrieve|retrieves|retrieving|retrieved|pull|pulls|pulling|"
-        r"pulled|import|imports|importing|imported|get|gets|getting|got|"
-        r"receive|receives|receiving|received)\b[^.!?;]{0,40}?\bfrom\s+"
-        r"(?:the\s+|a\s+|an\s+|its\s+|your\s+|this\s+|that\s+)?(?:\w+\s+){0,2}?"
-        r"(?:internet|web|network|remote|external|online|hosted|public|"
-        r"third[- ]party|cloud|upstream|url|" + _SERVICE_ALT + r")\b",
-        re.I,
-    ),
-    re.compile(
-        r"\b(?:upload|uploads|uploading|uploaded|post|posts|posting|posted|"
-        r"publish|publishes|publishing|published|transmit|transmits|transmitting|"
-        r"transmitted|push|pushes|pushing|pushed|sync|syncs|syncing|synced|"
-        r"forward|forwards|forwarding|forwarded|send|sends|sending|sent)\b"
-        r"[^.!?;]{0,40}?\bto\s+(?:the\s+|a\s+|an\s+|your\s+)?(?:internet|cloud|"
-        r"network|remote|external|online|third[- ]party|hosted|public|upstream|"
-        + _SERVICE_ALT + r")\b",
-        re.I,
-    ),
-    re.compile(
-        r"\bsends?\s+(?:an?\s+|the\s+|out\s+)?(?:e[- ]?mails?|webhooks?)\b",
-        re.I,
-    ),
-    re.compile(
-        r"\b(?:" + _SERVICE_ALT + r")(?:'s|’s)?\s+"
-        r"(?:accounts?|drives?|inbox(?:es)?|mailbox(?:es)?|workspaces?|channels?)\b",
-        re.I,
-    ),
-)
 MAX_RESOLVED_LOCAL_EDGES = 20_000
 MAX_UNRESOLVED_LOCAL_EDGES = 1_000
 MAX_LOCAL_MODULES = 2_000
@@ -324,6 +280,37 @@ class _DisclosureAssessment:
     disclosed: bool
     reason: str
     contradiction: bool = False
+
+
+@dataclass(frozen=True)
+class _NetworkDestinations:
+    """Statically resolved destinations of a tool's reachable network egress.
+
+    `unresolved` is True when any reachable egress call has a destination that
+    cannot be read from a string literal (dynamic/computed URL), which must be
+    flagged for review rather than trusted.
+    """
+
+    external: tuple[str, ...] = ()
+    local: tuple[str, ...] = ()
+    unresolved: bool = False
+
+
+def _is_local_host(host: str) -> bool:
+    """True for loopback, link-local, and RFC1918/ULA private hosts."""
+
+    name = host.lower().strip(".")
+    if name in {"localhost", "0.0.0.0", "::1", "::"} or name.endswith(".localhost"):
+        return True
+    if name.startswith(("127.", "10.", "192.168.", "169.254.")):
+        return True
+    if name.startswith("172."):
+        octet = name.split(".")
+        if len(octet) >= 2 and octet[1].isdigit() and 16 <= int(octet[1]) <= 31:
+            return True
+    if name.startswith(("fc", "fd")) and ":" in name:  # IPv6 unique-local
+        return True
+    return False
 
 
 def _poisoning_indicator(description: str) -> _DescriptionIndicator | None:
@@ -398,12 +385,12 @@ def _sentences(description: str) -> list[str]:
 
 def _assess_network_disclosure(
     description: str,
-    static_hosts: Iterable[str] = (),
+    destinations: _NetworkDestinations,
 ) -> _DisclosureAssessment:
     sentences = _sentences(description)
-    normalized = " ".join(_normalize_apostrophes(description).split())
 
     # 1. Explicit denial of network access, scoped to a sentence -> contradiction.
+    # Best-effort: a denial this misses still flags below rather than suppressing.
     for sentence in sentences:
         for pattern in NETWORK_DENIAL_PATTERNS:
             denial = pattern.search(sentence)
@@ -415,57 +402,60 @@ def _assess_network_disclosure(
                     contradiction=True,
                 )
 
-    hosts = tuple(sorted({host.lower() for host in static_hosts if host}))
+    # A service counts as a named destination only in a non-negated sentence, so a
+    # denial ("never contacts Slack") can never double as a disclosure.
     described = sorted(
         service
         for service in KNOWN_DESTINATIONS
-        if re.search(rf"\b{service}\b", normalized, re.I)
+        if any(
+            re.search(rf"\b{service}\b", sentence, re.I) and not _NEGATION.search(sentence)
+            for sentence in sentences
+        )
     )
 
-    # 2. When the reachable destination is statically known, it is authoritative:
-    # every resolved host must be accounted for by a named service whose
-    # registrable domain matches it. Generic prose cannot vouch for a specific
-    # host the description does not name, and one matching host cannot clear the
-    # others.
-    if hosts:
+    external = destinations.external
+    if external:
         unaccounted = [
             host
-            for host in hosts
+            for host in external
             if not any(_host_matches_service(host, service) for service in described)
         ]
-        if not unaccounted:
-            return _DisclosureAssessment(
-                True, "description names the reachable destination(s)"
-            )
-        if described:
+        if unaccounted:
+            if described:
+                return _DisclosureAssessment(
+                    False,
+                    f"described destination {described!r} does not match "
+                    f"static host(s) {unaccounted!r}",
+                )
             return _DisclosureAssessment(
                 False,
-                f"described destination {described!r} does not match "
-                f"static host(s) {unaccounted!r}",
+                f"a specific external host {unaccounted!r} is reachable but the "
+                "description names no matching destination",
             )
+        # Every resolved external host is named. Only clean if nothing else is
+        # left unresolved.
+        if destinations.unresolved:
+            return _DisclosureAssessment(
+                False,
+                "a further reachable network destination is not statically "
+                "resolvable and is not disclosed",
+            )
+        return _DisclosureAssessment(True, "description names the reachable destination(s)")
+
+    # No external host resolved to a literal. A dynamic/computed destination cannot
+    # be verified, so it is flagged, never suppressed by prose.
+    if destinations.unresolved:
         return _DisclosureAssessment(
             False,
-            f"a specific external host {unaccounted!r} is reachable but the "
-            "description names no destination",
+            "the reachable network destination is not statically resolvable and is "
+            "not disclosed",
         )
-
-    # 3. No statically known host (dynamic destination): fall back to clear
-    # affirmative egress phrasing that is not negated within its sentence.
-    for sentence in sentences:
-        if _NEGATION.search(sentence):
-            continue
-        for pattern in NETWORK_DISCLOSURE_PATTERNS:
-            match = pattern.search(sentence)
-            if match is not None:
-                return _DisclosureAssessment(
-                    True,
-                    f"description states external network egress: {match.group(0)!r}",
-                )
-
-    # 4. Fail safe: reachable egress is not clearly disclosed.
+    if destinations.local:
+        return _DisclosureAssessment(
+            True, "reachable network calls target only local or loopback hosts"
+        )
     return _DisclosureAssessment(
-        False,
-        "description does not clearly disclose the reachable network egress",
+        False, "reachable network egress has no statically resolved destination"
     )
 
 
@@ -1525,8 +1515,20 @@ def _static_network_endpoint(call: ast.Call, symbol: str) -> str | None:
     return None
 
 
-def _static_network_hosts(project: ParsedProject, tool: ToolDefinition) -> tuple[str, ...]:
-    hosts: set[str] = set()
+def _network_destinations(
+    project: ParsedProject,
+    tool: ToolDefinition,
+) -> _NetworkDestinations:
+    """Classify the reachable network egress destinations of a tool.
+
+    Every reachable egress call whose destination is not a resolvable string
+    literal marks the result `unresolved`, so a dynamic/computed URL to an
+    undisclosed host is flagged rather than trusted.
+    """
+
+    external: set[str] = set()
+    local: set[str] = set()
+    unresolved = False
     for record in reachable_functions(project, tool):
         execution = _execution(record, project)
         for node in execution.nodes:
@@ -1539,12 +1541,17 @@ def _static_network_hosts(project: ParsedProject, tool: ToolDefinition) -> tuple
                 if _call_capability(node, symbol, imports) != Capability.NETWORK_EGRESS:
                     continue
             endpoint = _static_network_endpoint(node, symbol)
-            if endpoint is None:
+            host = urlsplit(endpoint).hostname if endpoint is not None else None
+            if not host:
+                unresolved = True
                 continue
-            host = urlsplit(endpoint).hostname
-            if host:
-                hosts.add(host.lower())
-    return tuple(sorted(hosts))
+            host = host.lower()
+            (local if _is_local_host(host) else external).add(host)
+    return _NetworkDestinations(
+        external=tuple(sorted(external)),
+        local=tuple(sorted(local)),
+        unresolved=unresolved,
+    )
 
 
 def analyze_capabilities(
@@ -2404,7 +2411,7 @@ def analyze_contract(
     if Capability.NETWORK_EGRESS in capabilities:
         assessment = _assess_network_disclosure(
             tool.description,
-            _static_network_hosts(project, tool),
+            _network_destinations(project, tool),
         )
         network_evidence = by_capability[Capability.NETWORK_EGRESS]
         disclosure_detail = f"description check: {assessment.reason}"

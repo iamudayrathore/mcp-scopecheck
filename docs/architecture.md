@@ -146,33 +146,31 @@ context exception avoids treating documentation that discusses common prompt
 injection wording as an instruction. Zero corpus errors describe only the fixed
 local examples; they are not a general accuracy claim.
 
-`MSC102` is deterministic contract-mismatch detection that errs toward flagging.
-The reachable network call is always reported as an observed capability; the rule
-treats it as undisclosed unless the description clearly accounts for it.
+`MSC102` is deterministic contract-mismatch detection. The reachable network call
+is always reported as an observed capability, and — by design — a tool's prose can
+never *suppress* the finding. Free-text descriptions are an adversarial surface: a
+malicious author can always word around a suppression heuristic, so MSC102 trusts
+only verifiable evidence and flags anything it cannot confirm.
 
-When the destination is statically known (a literal host is reachable), that
-evidence is authoritative: every reachable host must be accounted for by a named
-service whose registrable domain matches it, compared against a first-party
-domain allowlist so an attacker-controllable host (a typosquat, a subdomain
-prefix, or a user-content domain such as `*.github.io`) does not match. A host the
-description does not name is flagged even when the prose otherwise sounds like a
-disclosure, and one matching host does not clear another; a named service that
-matches no reachable host is a destination mismatch.
+MSC102 does not fire only when the reachable destination is a statically resolved
+external host whose registrable domain matches a service the description names,
+compared against a first-party domain allowlist so an attacker-controllable host
+(a typosquat, a subdomain prefix, or a user-content domain such as `*.github.io`)
+does not match. Every reachable external host must be named; one matching host does
+not clear another; a named service matching no reachable host is a destination
+mismatch. Purely local or loopback destinations (`localhost`, `127.0.0.1`,
+RFC1918/ULA ranges) are not external egress and do not fire.
 
-When the destination is dynamic (no literal host), the verdict falls back to the
-description: disclosure requires an outbound action affirmatively bound to an
-external target (for example "download … from a URL", "upload … to a remote
-service", "makes an HTTP request", "sends an email"), not negated within its
-sentence. Isolated words such as `API`, `web`, `network`, `remote`, `URL`, or
-`endpoint`, generic verbs (including "sends a message/notification"), unrelated
-named-service mentions, and documentation domains are all insufficient on their
-own. Explicit offline/no-network wording, sentence-scoped, is a contradiction when
-egress is reachable.
+A destination that cannot be statically resolved — a dynamic or computed URL, the
+common case for client libraries — is always flagged for review, never vouched for
+by wording. An explicit offline/no-network denial is reported as a contradiction;
+denial detection is best-effort and narrow, because a denial it misses simply
+flags the egress as undisclosed rather than suppressing it.
 
-Because over-flagging a disclosed call is a safe, correctable error and silent
-hidden egress is not, ambiguous wording is flagged, not suppressed. This does not
-establish endpoint intent, validate the description's truthfulness, or understand
-paraphrases beyond the documented patterns.
+This is a deliberate recall-over-precision stance for a security tool: a reachable
+call whose destination cannot be verified is surfaced for a human to confirm. It
+does not establish endpoint intent or validate the description's truthfulness, and
+it will flag well-behaved tools whose URLs are constructed at runtime.
 
 MCP tool annotations are untrusted declarations, not enforcement. ScopeCheck
 accepts the Python-style snake_case and protocol-style camelCase spellings for

@@ -77,17 +77,15 @@ return clean exit `0`, and four repositories gained meaningful cross-module
 capability visibility.
 
 On this corpus v0.2.0 reports the six confirmed process-execution detections
-(`MSC106`) plus two conservative `MSC102` flags on a community server: one whose
-description implies a download without clearly stating an external fetch, and one
-that names an external endpoint the deterministic rules do not model (a service
-name outside the recognized set). Both are conservative over-flags on wording the
-rule cannot confirm, not missed egress. `MSC102` is fail safe by design: it reports every reachable network call
-and flags egress that a description does not clearly disclose, rather than
-suppressing a finding on fragile wording matches. The eight reachable-egress
-tools that do disclose clearly (for example naming Gmail, Google Drive, or a
-matching host) remain clean through the general disclosure rules, not through
-corpus-specific exceptions. These are curated-corpus observations, not
-ecosystem-wide precision or recall claims.
+(`MSC106`) plus ten `MSC102` network-egress flags — all ten reachable-egress
+tools in the corpus (eight in one Google Workspace server, two in a YouTube
+server). Every one builds its request URL at runtime through a client library, so
+the destination cannot be statically resolved and the tool is flagged for review
+rather than trusted. `MSC102` cannot be suppressed by a tool's prose by design;
+the ten flags are the deliberate recall-over-precision consequence of that choice,
+not missed egress. None is a false negative: each names a genuinely reachable
+network call whose destination ScopeCheck cannot verify. These are curated-corpus
+observations, not ecosystem-wide precision or recall claims.
 
 ## Compatibility and limits
 

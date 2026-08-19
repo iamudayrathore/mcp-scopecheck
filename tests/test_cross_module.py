@@ -351,7 +351,7 @@ class CrossModuleTests(unittest.TestCase):
                             "def mutate(path):",
                             "    open(path, 'w').write('x')",
                             "    subprocess.run(['fixed'])",
-                            "    return requests.get(path + '/fetch')",
+                            "    return requests.get('https://api.github.com/data')",
                             "def dynamic():",
                             "    return eval('1 + 1')",
                         ]
@@ -360,7 +360,7 @@ class CrossModuleTests(unittest.TestCase):
                         [
                             "from .sinks import mutate, dynamic",
                             "@mcp.tool(",
-                            "    description='Fetch from a hosted service.',",
+                            "    description='Fetch issues from the GitHub API.',",
                             "    annotations={'readOnlyHint': True, 'openWorldHint': False},",
                             ")",
                             "def claimed(path: str):",
