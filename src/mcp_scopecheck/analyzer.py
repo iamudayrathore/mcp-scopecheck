@@ -112,6 +112,13 @@ NETWORK_CLIENT_CONSTRUCTORS = {
     "requests.sessions.Session": frozenset(
         {"delete", "get", "head", "options", "patch", "post", "put", "request", "send"}
     ),
+    "http.client.HTTPConnection": frozenset(
+        {"connect", "request", "putrequest", "send", "endheaders"}
+    ),
+    "http.client.HTTPSConnection": frozenset(
+        {"connect", "request", "putrequest", "send", "endheaders"}
+    ),
+    "socket.socket": frozenset({"connect", "connect_ex", "sendall", "sendto"}),
 }
 PROCESS_PREFIXES = ("asyncio.create_subprocess_", "subprocess.")
 PROCESS_CALLS = {"os.popen", "os.system"}
