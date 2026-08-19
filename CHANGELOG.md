@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.2.1 - 2026-08-19
+
+Correctness patch for filesystem-scope analysis. Upgrading is recommended for
+every 0.2.0 user: 0.2.0 could report `complete` with no findings and exit `0`
+for a tool that read or wrote arbitrary caller-supplied paths.
+
+- `MSC103` and `MSC104` no longer depend on parameter naming. Path tracking is
+  now seeded from every declared tool parameter, and the existing flow analysis
+  decides participation: `_sink_value` reads only path positions (the receiver,
+  argument 0, argument 1 of a two-path call, and the `file`/`filename`/`path`/
+  `src`/`dst` keywords), so a parameter becomes a sink source only when it
+  genuinely occupies a path position. In 0.2.0 a traversal through a parameter
+  named `filepath`, `pathname`, `dirpath`, `target`, `dest`, `src`, `uri`,
+  `location`, or `name` was silently missed; only 8 exact names and 5 suffixes
+  were tracked. Data arguments beside a path (`write_text(body)`) and separators
+  or prefixes that never reach a filesystem sink (`sep: str = "/"`) remain clean.
+- `MSC104` additionally qualifies a differently named parameter that is proven to
+  reach a filesystem sink, while still not treating an unrelated `"/"` default as
+  a filesystem root. Its evidence now points at the parameter default rather than
+  at the tool description line.
+- `MSC103` suppression is scoped per sink. 0.2.0 withheld the rule whenever the
+  tool contained any unresolved reachable call, so an unrelated dynamic import
+  could hide a proven traversal. A sink is now withheld only when unresolved work
+  could actually own its guard: decorator/wrapper indirection, which observes
+  every argument before the body runs, or an unresolved call that actually
+  receives the path value. Sinks with fully proven lineage are reported even when
+  the tool has other unresolved calls, and the analysis still reports `partial`
+  with exit `2`.
+- Constructing a locally defined class is reported as `unsupported instance/class
+  dispatch` instead of `higher-order call`. A local class shadows into the module
+  alias table with an empty target, which previously routed it to the variable
+  call branch.
+- An empty finding list under `partial` or `failed` completeness no longer renders
+  as "No contract mismatches or high-risk behavior detected"; it now states that
+  there are no findings within an incomplete analysis.
+- The `MSC103-GUARD-UNKNOWN` notification is gated on proven filesystem
+  participation or a path-like parameter name rather than naming alone, and its
+  message no longer claims lineage that may not exist.
+- `MSC001` severity is now assigned per indicator family instead of always being
+  Critical. The `credential-handling instruction` and `cross-call instruction`
+  families report High, because a verb near a credential noun and sequencing
+  wording both appear in accurate self-descriptions of credential, authentication,
+  and workflow tools; reporting them at Critical made honest tools
+  indistinguishable from poisoned ones. Unambiguous directive families - override,
+  concealment, hidden action, covert transfer, privileged-role impersonation, and
+  hidden-token markers - remain Critical. When a description matches several
+  families the strongest is now reported rather than the first in declaration
+  order. Detection is unchanged; no description that was flagged before is
+  unflagged now.
+- No change to the exit-code contract, the no-execution invariant, the resource
+  limits, the SARIF schema, or the snapshot digest payload.
+
 ## 0.2.0 - 2026-08-19
 
 - Added explicit `complete`, `partial`, and `failed` analysis states with exit

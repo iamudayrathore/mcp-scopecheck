@@ -87,11 +87,11 @@ side effect in a fixture and proves it does not execute during an audit.
 
 | Rule | Severity | What it means |
 | --- | --- | --- |
-| `MSC001` | Critical | Deterministic indicator families find agent-directed override, concealment, covert transfer, or related high-risk wording |
+| `MSC001` | High/Critical | Deterministic indicator families find agent-directed wording. Unambiguous directives (override, concealment, covert transfer, hidden-token markers, privileged-role impersonation) are Critical; ambiguous credential-handling and cross-call sequencing wording is High |
 | `MSC101` | High/Critical | `readOnlyHint=true` conflicts with justified state-changing behavior; process and dynamic code conflicts are Critical |
 | `MSC102` | High | Mandatory external-egress review for modeled network sinks: every modeled external and dynamic/computed destination is flagged, since neither prose nor a matching service hostname proves the destination; only local/loopback/private destinations are exempt. Specialized subtypes report explicit-denial contradictions and destination mismatches |
-| `MSC103` | High | A correlated path-like input reaches a filesystem operation without a recognized guard on that value |
-| `MSC104` | High | A path/root parameter defaults to the POSIX root or to an exact home root that code actually expands |
+| `MSC103` | High | A tool parameter reaches a filesystem operation in a path position without a recognized guard on that value; participation is decided by dataflow, not by parameter naming |
+| `MSC104` | High | A path-like or filesystem-reaching parameter defaults to the POSIX root or to an exact home root that code actually expands |
 | `MSC105` | Critical | Environment-derived data reaches a supported module or proven client-instance network sink in the same reachable function |
 | `MSC106` | Critical | Process or shell execution is reachable |
 | `MSC107` | Critical | `eval` or `exec` is reachable |
@@ -154,10 +154,27 @@ makes the audit partial. Ordinary calls proven to target the standard library or
 an external package do not by themselves make an audit partial.
 
 `MSC001` is a deterministic description check, not semantic or LLM analysis.
+Its families are pattern-based and are not equally precise. The
+`credential-handling instruction` and `cross-call instruction` families match a
+verb near a credential noun and sequencing wording respectively, both of which
+also appear in accurate self-descriptions - a secrets manager that says it "reads
+credentials from the configured keychain", or a tool documenting a prerequisite
+"before any request". Those families report **High** so they read as evidence for
+a human decision rather than as proof of poisoning. The `concealment instruction`
+family remains Critical and can still fire on a safety claim phrased as a
+prohibition (for example "never reveal the user password in logs"); treat a lone
+`MSC001` finding as a prompt to read the description, not as a verdict. Precision
+and recall have not yet been measured against a large corpus of real MCP tool
+descriptions; the bundled corpus is a small regression fixture, not a benchmark.
 `MSC102` compares the statically resolved egress destination against the
 description and never lets prose suppress a finding; an unresolved destination is
-always flagged. `MSC103` correlates simple path aliases and transformations with the
-guarded value; `.resolve()` alone is only normalization. `MSC105` follows direct
+always flagged. `MSC103` seeds from every declared tool parameter and correlates simple path
+aliases and transformations with the guarded value; only path argument positions
+count, so a data argument beside a path is not treated as one. `.resolve()` alone
+is only normalization. A sink is withheld only when unresolved work could own its
+guard - wrapper/decorator indirection, or an unresolved call that receives the
+path value - so unrelated indirection elsewhere in the tool no longer hides a
+proven traversal. `MSC105` follows direct
 environment reads, simple value assignments, and proven local HTTP-client
 bindings in lexical order within one function. Reassignment and deletion kill a
 client binding. ScopeCheck does not model complete Python control flow, general

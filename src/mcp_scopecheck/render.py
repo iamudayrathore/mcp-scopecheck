@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .models import AuditReport
+from .models import AnalysisStatus, AuditReport
 
 _BIDI_CONTROLS = frozenset(
     {
@@ -179,7 +179,18 @@ def render_report(report: AuditReport) -> str:
 
     lines.append(f"Findings ({len(report.findings)})")
     if not report.findings:
-        lines.append("  No contract mismatches or high-risk behavior detected by the v0.2 rules.")
+        if report.completeness.status is AnalysisStatus.COMPLETE:
+            lines.append(
+                "  No contract mismatches or high-risk behavior detected by the v0.2 rules."
+            )
+        else:
+            # An empty finding list inside an incomplete analysis is not a clean
+            # result. Never let it read like one.
+            lines.append(
+                "  No findings within an incomplete analysis "
+                f"(completeness: {report.completeness.status.value}); "
+                "unreviewed behavior may remain."
+            )
     else:
         for finding in report.findings:
             lines.extend(

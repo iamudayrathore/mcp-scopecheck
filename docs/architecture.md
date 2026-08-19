@@ -234,9 +234,17 @@ outside the recognized set (`pycurl`, `smtplib`, `ftplib`, `websockets`, DNS
 resolvers) is likewise unmodeled. Proven instance methods require a known
 supported constructor binding that remains live at that statement.
 
-`MSC103` tracks exact path-like parameter names and common suffixes such as
-`*_path` through simple aliases, supported path transformations, and supported
-direct local helper calls. A guard applies only to the value lineage checked before
+`MSC103` tracks every declared tool parameter through simple aliases, supported
+path transformations, and supported direct local helper calls. Participation is
+decided by dataflow rather than by naming: `_sink_value` reads only path
+positions - the receiver of a proven `pathlib.Path` method, argument 0, argument 1
+of a two-path call such as `shutil.move`, and the `file`/`filename`/`path`/`src`/
+`dst` keywords - so a parameter becomes a sink source only when it genuinely
+occupies a path position. Parameter naming is retained as a ranking and fallback
+signal (`MSC104` qualification, and completeness notification when lineage cannot
+be followed), never as the gate for `MSC103`. Releases before 0.2.1 gated on
+naming and therefore missed traversals through parameters such as `filepath`,
+`target`, and `name`. A guard applies only to the value lineage checked before
 the sink. Recognized forms are a successful `Path.relative_to(fixed_root)` call,
 a checked `Path.is_relative_to(fixed_root)` branch whose rejecting path
 terminates, and an equality check between `os.path.commonpath(...)` and an
