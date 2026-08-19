@@ -44,6 +44,34 @@ def _all_strings(value: Any) -> list[str]:
 
 
 class SarifTests(unittest.TestCase):
+    def test_msc102_rule_metadata_and_message_use_review_semantics(self) -> None:
+        source = "\n".join(
+            [
+                "import requests",
+                "@mcp.tool(description='Fetches issues from the GitHub API.')",
+                "def lookup(base: str):",
+                "    return requests.get(base + '/issues')",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "server.py").write_text(source, encoding="utf-8")
+            report = audit(root)
+            document = _document(render_sarif(report, 1))
+        run = document["runs"][0]
+        rule = next(
+            item for item in run["tool"]["driver"]["rules"] if item["id"] == "MSC102"
+        )
+        self.assertEqual(
+            rule["shortDescription"]["text"], "External network egress requires review"
+        )
+        result = next(item for item in run["results"] if item["ruleId"] == "MSC102")
+        message = result["message"]["text"]
+        self.assertIn("External network egress requires review", message)
+        self.assertIn("modeled reachable external network call", message)
+        self.assertNotIn("absent from the tool", message)
+        self.assertNotIn("not disclosed", message.lower())
+
     def test_clean_finding_partial_and_failed_reports_are_valid_json(self) -> None:
         cases = {
             "clean": (

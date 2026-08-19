@@ -49,7 +49,21 @@ cross-module environment-to-network taint or general interprocedural data flow.
 Capabilities are evidence, not automatic vulnerabilities. ScopeCheck does not
 prove authorization correctness, SSRF safety, SQL safety, shell safety, symlink
 safety, time-of-check/time-of-use safety, or runtime policy enforcement. Network
-and filesystem sink coverage is deliberately allowlisted and incomplete.
+and filesystem sink coverage is deliberately allowlisted and incomplete: egress
+through unmodeled clients (for example `pycurl`, `smtplib`, `ftplib`, `websockets`,
+or DNS resolvers) is not detected, so `MSC102` cannot review it.
+
+`MSC102` is an external-egress review signal for modeled network sinks. Neither
+description prose nor a matching service hostname suppresses it, and no modeled
+external destination is treated as a clean pass; the only exemption is a
+destination classified as local, loopback, or private
+(`localhost`/loopback/RFC1918/IPv6 ULA, by explicit IP-address parsing). Those
+local/loopback/private destinations remain visible as observed network
+capabilities but do not produce an `MSC102` finding. That exemption is a
+precision choice, not a safety judgment: egress to local, loopback, or private
+addresses can still be security-relevant — local proxies, lateral movement,
+access to internal services, or SSRF-style behavior — and may warrant human
+review even without an `MSC102` finding.
 
 ## Language and output boundaries
 

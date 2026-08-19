@@ -76,20 +76,18 @@ formerly clean reports with manually observed unresolved local behavior no longe
 return clean exit `0`, and four repositories gained meaningful cross-module
 capability visibility.
 
-On this corpus v0.2.0 reports the six confirmed process-execution detections
-(`MSC106`) plus eleven `MSC102` network-egress flags — every reachable-egress tool
-in the corpus (eight in a Google Workspace server, two in a YouTube server, and one
-`aiohttp` documentation lookup in a Redis server). Each builds its request URL
+On this corpus v0.2.0 produced eleven `MSC102` external-egress review findings
+across three projects, plus six `MSC106` process-execution findings. Every
+reachable-egress tool in the corpus was surfaced. Each builds its request URL
 through a client library or an interpolated string, so the destination is not a
 plain string literal ScopeCheck's endpoint extractor can read, and the tool is
-flagged for review rather than trusted. `MSC102` cannot be suppressed by a tool's
-prose by design, and no reachable external destination is treated as a clean pass
-even when the description names a matching service — a service host can serve
-attacker-controlled content indistinguishable by hostname. The eleven flags are
-the deliberate recall-over-precision consequence of that choice, not missed egress;
-each names a genuinely reachable network call whose destination ScopeCheck cannot
-verify. These are curated-corpus observations, not ecosystem-wide precision or
-recall claims.
+flagged for review rather than trusted. For modeled network sinks, `MSC102` is not
+suppressed by a tool's prose or by a matching service hostname — a service host can
+serve attacker-controlled content indistinguishable by hostname — so no reachable
+external destination is treated as a clean pass. The eleven findings are the
+deliberate recall-over-precision consequence of that choice, not missed egress, and
+are not confirmed vulnerabilities. These are curated-corpus observations, not
+ecosystem-wide precision, recall, vulnerability, or prevalence claims.
 
 ## Compatibility and limits
 

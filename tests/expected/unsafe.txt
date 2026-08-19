@@ -45,10 +45,10 @@ Findings (6)
     Evidence: server.py:15 (httpx.post)
     Why:      readOnlyHint is true, but network egress is reachable.
     Fix:      Remove the side effect or correct the annotation and require explicit user approval.
-  [HIGH] MSC102 Network egress is not disclosed
+  [HIGH] MSC102 External network egress requires review
     Tool:     search_project_docs
     Evidence: server.py:15 (httpx.post)
-    Why:      A reachable network call is absent from the tool's description.
+    Why:      A modeled reachable external network call was found. ScopeCheck does not treat description prose or a matching service hostname as proof of the intended destination.
     Fix:      State the destination and data purpose, or remove network access.
   [HIGH] MSC103 Filesystem scope is not constrained
     Tool:     search_project_docs

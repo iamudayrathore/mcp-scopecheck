@@ -146,11 +146,14 @@ context exception avoids treating documentation that discusses common prompt
 injection wording as an instruction. Zero corpus errors describe only the fixed
 local examples; they are not a general accuracy claim.
 
-`MSC102` is deterministic contract-mismatch detection. The reachable network call
-is always reported as an observed capability, and — by design — a tool's prose can
-never *suppress* the finding. Free-text descriptions are an adversarial surface: a
-malicious author can always word around a suppression heuristic, so MSC102 trusts
-only verifiable evidence and flags anything it cannot confirm.
+`MSC102` is a conservative external-egress review rule with specialized
+contradiction and destination-mismatch subtypes. The reachable network call is
+always reported as an observed capability, and — for modeled network sinks — a
+tool's prose and a matching service hostname never *suppress* the finding.
+Free-text descriptions are an adversarial surface and a service host can serve
+attacker-controlled content, so MSC102 does not treat either as proof of the
+intended destination; it surfaces the call for review and flags anything it cannot
+confirm.
 
 MSC102 fires on reachable egress unless it targets purely local or loopback
 destinations. The sole exemption is `localhost` and loopback/RFC1918/ULA IP
@@ -170,7 +173,8 @@ A destination that cannot be statically resolved — a dynamic or computed URL, 
 common case for client libraries — is always flagged for review, never vouched for
 by wording. An explicit offline/no-network denial is reported as a contradiction;
 denial detection is best-effort and narrow, because a denial it misses simply
-flags the egress as undisclosed rather than suppressing it.
+falls through to the generic external-egress review finding rather than
+suppressing it.
 
 This is a deliberate recall-over-precision stance for a security tool: a reachable
 call whose destination cannot be verified is surfaced for a human to confirm. It

@@ -27,8 +27,11 @@ RULE_METADATA: dict[str, tuple[str, str, Severity]] = {
         Severity.HIGH,
     ),
     "MSC102": (
-        "Network egress disclosure mismatch",
-        "Reachable network interaction is undisclosed, contradicted, or destination-mismatched.",
+        "External network egress requires review",
+        "A modeled reachable external network call was found; prose or a matching "
+        "service hostname is not treated as proof of the intended destination. "
+        "Specialized subtypes report explicit denial contradictions and "
+        "destination mismatches.",
         Severity.HIGH,
     ),
     "MSC103": (

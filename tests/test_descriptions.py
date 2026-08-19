@@ -140,17 +140,22 @@ class DescriptionContractTests(unittest.TestCase):
                 self.assertIn("contradicts", finding.title)
                 self.assertIn("explicit denial", finding.message)
 
-    def test_external_host_on_a_named_service_domain_still_flags(self) -> None:
+    def test_disclosed_github_api_call_uses_review_title_not_absent_claim(self) -> None:
         # A host match is not proof of disclosure: services host attacker content on
-        # their own domains, so even api.github.com with "GitHub" named must flag.
+        # their own domains, so even api.github.com with "GitHub" named must flag —
+        # but with truthful wording, not a claim that the call is undisclosed.
         report = _audit_description(
-            "Queries the external GitHub API with the supplied repository name.",
+            "Fetches issues from the GitHub API.",
             "https://api.github.com/repos/openai/openai-python",
         )
         finding = _msc102(report)
         self.assertIsNotNone(finding)
         assert finding is not None
-        self.assertIn("not disclosed", finding.title)
+        self.assertEqual(finding.title, "External network egress requires review")
+        self.assertNotIn("absent", finding.message)
+        self.assertNotIn("not disclosed", finding.title.lower())
+        # The observed static destination is retained in the finding evidence.
+        self.assertIn("api.github.com", finding.evidence.detail)
 
     def test_named_destination_must_match_a_static_host(self) -> None:
         report = _audit_description(
@@ -166,9 +171,11 @@ class DescriptionContractTests(unittest.TestCase):
 
 
 class FailSafeDisclosureTests(unittest.TestCase):
-    """Option A: prose can never suppress. Reachable egress is undisclosed unless
-    a resolved external host matches a service the description names; a dynamic or
-    computed destination is always flagged; local/loopback egress is not external."""
+    """MSC102 external-egress review: neither prose nor a matching service hostname
+    ever clears a modeled external destination. Every modeled external and every
+    dynamic/computed destination is flagged; service matching only selects the
+    destination-mismatch subtype; only local/loopback/private destinations (by
+    explicit IP-address classification) are exempt."""
 
     def test_reachable_egress_flags_unless_clearly_disclosed(self) -> None:
         # Generic, local-sounding, or reference-only wording must never suppress a
@@ -472,10 +479,10 @@ class FailSafeDisclosureTests(unittest.TestCase):
 
     def test_msc102_subtypes_are_pinned(self) -> None:
         # Each of the three MSC102 subtypes is produced for a representative case.
-        undisclosed = _msc102(_audit_dynamic("Retrieves the endpoint name for diagnostics."))
-        self.assertIsNotNone(undisclosed)
-        assert undisclosed is not None
-        self.assertIn("not disclosed", undisclosed.title)
+        review = _msc102(_audit_dynamic("Retrieves the endpoint name for diagnostics."))
+        self.assertIsNotNone(review)
+        assert review is not None
+        self.assertEqual(review.title, "External network egress requires review")
 
         mismatch = _msc102(
             _audit_description(
@@ -491,6 +498,21 @@ class FailSafeDisclosureTests(unittest.TestCase):
         self.assertIsNotNone(contradiction)
         assert contradiction is not None
         self.assertIn("contradicts", contradiction.title)
+
+    def test_clearly_disclosed_dynamic_url_uses_generic_review_finding(self) -> None:
+        # Even an unambiguous disclosure of a dynamic destination gets the generic
+        # external-egress review finding with truthful wording.
+        finding = _msc102(
+            _audit_dynamic(
+                "Downloads the requested report from the external reporting API over "
+                "the network and returns its contents."
+            )
+        )
+        self.assertIsNotNone(finding)
+        assert finding is not None
+        self.assertEqual(finding.title, "External network egress requires review")
+        self.assertIn("does not treat description prose", finding.message)
+        self.assertNotIn("absent", finding.message)
 
     def test_egress_is_observed_on_local_only_clean_case(self) -> None:
         # The one clean case with reachable egress is local/loopback-only; the

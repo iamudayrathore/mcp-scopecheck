@@ -47,7 +47,7 @@ $ mcp-scopecheck audit examples/unsafe_docs_server
 [CRITICAL] MSC001 Agent-directed instruction in tool description
 [CRITICAL] MSC105 Environment data reaches network egress
 [HIGH] MSC101 Read-only claim conflicts with reachable behavior
-[HIGH] MSC102 Network egress is not disclosed
+[HIGH] MSC102 External network egress requires review
 [HIGH] MSC103 Filesystem scope is not constrained
 [HIGH] MSC104 Dangerous filesystem default
 ```
@@ -89,7 +89,7 @@ side effect in a fixture and proves it does not execute during an audit.
 | --- | --- | --- |
 | `MSC001` | Critical | Deterministic indicator families find agent-directed override, concealment, covert transfer, or related high-risk wording |
 | `MSC101` | High/Critical | `readOnlyHint=true` conflicts with justified state-changing behavior; process and dynamic code conflicts are Critical |
-| `MSC102` | High | Reachable network egress whose destination is not verifiably disclosed. Every external destination is flagged (a host match to a named service is not proof — services host attacker content on their own hosts); only local/loopback egress is exempt. Prose never suppresses it |
+| `MSC102` | High | Mandatory external-egress review for modeled network sinks: every modeled external and dynamic/computed destination is flagged, since neither prose nor a matching service hostname proves the destination; only local/loopback/private destinations are exempt. Specialized subtypes report explicit-denial contradictions and destination mismatches |
 | `MSC103` | High | A correlated path-like input reaches a filesystem operation without a recognized guard on that value |
 | `MSC104` | High | A path/root parameter defaults to the POSIX root or to an exact home root that code actually expands |
 | `MSC105` | Critical | Environment-derived data reaches a supported module or proven client-instance network sink in the same reachable function |

@@ -207,22 +207,22 @@ BENIGN_SECURITY_DISCUSSION = re.compile(
     re.I | re.S,
 )
 
-# --- MSC102 network-egress disclosure (conservative, fail-safe) ---
-# ScopeCheck proves reachable network egress from the call graph; that fact is
-# always reported as an observed capability. Whether a natural-language description
-# *discloses* that egress cannot be decided reliably from prose — three review
-# rounds showed every prose-suppression heuristic is defeatable in both directions
-# — so MSC102 never lets a description suppress a finding. Egress is treated as
-# undisclosed unless the ONE non-evadable signal holds: the reachable destination
-# is a statically resolved external host whose registrable domain matches a service
-# the description names. Purely local/loopback destinations are not external egress.
-# A destination that cannot be resolved statically (dynamic/computed URL) is flagged
-# for review, never suppressed. An explicit denial is reported as a contradiction;
-# denial detection is best-effort, because a missed denial still falls through to a
-# flag rather than to silence.
-# Discord is intentionally absent: its webhook exfil endpoint shares the discord.com
-# host with its API, so a reachable host cannot distinguish the two — every Discord
-# egress is therefore flagged rather than matched.
+# --- MSC102 external-network-egress review (conservative, fail-safe) ---
+# ScopeCheck proves reachable network egress from the call graph and always reports
+# it as an observed capability. For modeled network sinks, MSC102 is a mandatory
+# external-egress review signal: no modeled external destination is ever cleared,
+# because neither description prose nor a matching service hostname proves the
+# intended destination (services host attacker-controllable content on the same
+# hosts as their APIs, and prose is an adversarial surface). A dynamic/computed
+# destination is likewise flagged. The ONLY exemption is a destination classified
+# as local/loopback/private by explicit IP-address parsing (see `_is_local_host`).
+# Service matching below is used only to select the more informative
+# destination-mismatch subtype, never to suppress a finding. An explicit network
+# denial produces the contradiction subtype; denial detection is best-effort,
+# because a missed denial still falls through to the generic review finding rather
+# than to silence. Discord is intentionally absent from the service set: its
+# webhook endpoint shares the discord.com host with its API, so a host match would
+# be meaningless there.
 _SERVICE_NAMES = ("github", "gitlab", "gmail", "google", "slack")
 KNOWN_DESTINATIONS = frozenset(_SERVICE_NAMES)
 
@@ -377,15 +377,14 @@ def _poisoning_indicator(description: str) -> _DescriptionIndicator | None:
     return matches[0]
 
 
-# Public registrable domains for each named service. A reachable host discloses a
-# named service only when its registrable domain (eTLD+1) is on that service's
-# list, so a typosquat or subdomain-prefix host (github.evil-collector.example,
-# gmail-x.attacker.example) never matches while api.github.com, hooks.slack.com,
-# and gmail.googleapis.com do.
-# Only first-party API/service domains. User-content and redirect domains
-# (github.io, *.githubusercontent.com, googleusercontent.com, discord.gg) are
-# excluded: they serve attacker-controllable content, so a host on one of them
-# must not be auto-accepted as the named service.
+# Public registrable domains for each named service. A host match here NEVER clears
+# a finding — every modeled external destination is flagged regardless. The match is
+# used only to decide whether a reachable host is consistent with a service the
+# description names: an inconsistency yields the destination-mismatch subtype, and a
+# consistent host still yields the generic external-egress review finding. The list
+# is kept to first-party API domains (user-content/redirect domains such as
+# github.io and *.githubusercontent.com are omitted) so the mismatch subtype stays
+# meaningful; it is not a trust or allow decision.
 _SERVICE_DOMAINS: dict[str, frozenset[str]] = {
     "github": frozenset({"github.com"}),
     "gitlab": frozenset({"gitlab.com"}),
@@ -396,8 +395,10 @@ _SERVICE_DOMAINS: dict[str, frozenset[str]] = {
 
 # Hosts that sit on a first-party registrable domain but serve arbitrary
 # user-controlled endpoints (buckets, gists, deployed scripts, incoming webhooks).
-# Naming the service does not vouch for egress to these — an attacker can host a
-# drop there — so they never satisfy a service match and are always flagged.
+# Because no external host is ever cleared, this list does not affect suppression;
+# it only prevents such a host from being counted as "consistent" with a named
+# service, so egress to it is reported as a destination mismatch rather than a plain
+# review finding.
 _UNTRUSTED_SERVICE_HOSTS = (
     "storage.googleapis.com",
     "firebasestorage.googleapis.com",
@@ -419,8 +420,10 @@ def _registrable_domain(host: str) -> str:
 
 
 def _host_matches_service(host: str, service: str) -> bool:
-    """True when a reachable host's registrable domain belongs to a named service
-    and the host is not a user-content/webhook endpoint that anyone can target."""
+    """True when a reachable host is consistent with a named service (registrable
+    domain on the service list, excluding user-content/webhook hosts). This selects
+    the destination-mismatch subtype only; it never clears an external egress
+    finding."""
 
     host = host.lower().strip(".")
     if any(host == deny or host.endswith(f".{deny}") for deny in _UNTRUSTED_SERVICE_HOSTS):
@@ -2502,8 +2505,12 @@ def analyze_contract(
                     f"in the description. Deterministic check: {assessment.reason}."
                 )
             else:
-                title = "Network egress is not disclosed"
-                message = "A reachable network call is absent from the tool's description."
+                title = "External network egress requires review"
+                message = (
+                    "A modeled reachable external network call was found. ScopeCheck "
+                    "does not treat description prose or a matching service hostname "
+                    "as proof of the intended destination."
+                )
             findings.append(
                 _finding(
                     "MSC102",
