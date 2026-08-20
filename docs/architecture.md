@@ -57,6 +57,9 @@ plain-text diagnostics into JSON stdout.
 - At most 256 functions and 32 cross-module hops are followed per tool.
 - At most 1,000 capability paths are retained per tool.
 - At most 1,000 unresolved edges and 1,000 potential registrations are retained.
+- At most 250,000 binding-state work entries are copied or compared per module or
+  reachable function; exhaustion fails closed instead of allocating unbounded
+  per-node or per-branch binding maps.
 - Static decorator metadata accepts only bounded JSON-like values. Each tool's
   metadata is limited to 256 decoded nodes, 12 nesting levels, 16,384 UTF-8
   string bytes, 256-bit integers, and 128 collection items.
@@ -87,23 +90,39 @@ Unexpected internal ScopeCheck exceptions are not converted into target errors.
 
 ## Reachability and completeness model
 
-The root of analysis is each discovered module-level tool function. Direct calls
-to named functions in the same file and directly bound nested sync/async
-functions are followed transitively. v0.2 also resolves static relative and
+The root of analysis is the exact function definition captured by each discovered
+module-level tool decorator. A later definition that reuses the same Python name
+does not replace that registered root. Direct calls to named functions in the same
+file and directly bound nested sync/async functions are followed transitively.
+v0.2 also resolves static relative and
 absolute imports to Python files already accepted under the audit root. It
 follows direct imported-function calls, aliases, qualified local-module function
 calls, and one explicit `__init__.py` re-export hop. Resolution requires one
 module file and one module-level function target. Module cycles terminate through
 visited-state tracking.
 
-Function-local imports are resolved at the call site; parameters, assignments,
-deletion, and later imports update lexical bindings in statement order. At
-control-flow joins, a module/client/path binding is retained only when both
-analyzed paths agree. ScopeCheck never imports a module to resolve it, searches
-installed packages, or leaves the accepted audit root.
+Module and function-local imports are resolved at the call site; parameters,
+assignments, deletion, and later imports update lexical bindings in statement
+order. Literal `True` and `False` branches select the statically determined path.
+At other modeled control-flow joins, module, client, path, nested-function, and
+class bindings are retained only when analyzed paths agree. Loop-carried writes,
+abrupt loop exits, exception prefixes, suppressing context managers, and guarded
+match cases are conservatively retained as ambiguous until a definite later
+assignment replaces them. Conditional and short-circuit expressions, chained
+comparisons, loop-carried tests, and comprehension assignment expressions preserve
+the same possible-state joins. Assigning an imported module, local class, or helper
+object to another name is unresolved rather than treated as a proven direct alias.
+If an ambiguous binding is then called from reachable
+code, it enters the unresolved-edge ledger and makes the audit partial. ScopeCheck
+never imports a module to resolve it, searches installed packages, or leaves the
+accepted audit root.
 
-Defining a nested function or lambda does not make its body reachable. Decorator
-and default expressions are evaluated, while an uncalled nested body is skipped.
+Defining a nested function or lambda does not make its body reachable. Tool and
+reachable nested-function decorator/default expressions and annotations are
+evaluated, except that annotations are skipped when `from __future__ import
+annotations` defers them. Calls through definition-time project-local helper names
+are unresolved rather than guessed because later redefinition can replace the
+module's final name binding. An uncalled nested body is skipped.
 Class-definition bodies are evaluated but method bodies are not. Eager list,
 set, and dictionary comprehensions are traversed in their isolated target scope;
 the deferred body of a generator expression is not assumed to run merely because
@@ -112,7 +131,11 @@ the generator is created.
 Class and instance dispatch, callbacks, assigned function aliases, lambdas,
 partials, wrapper transformations, higher-order calls, wildcard imports, dynamic
 imports, ambiguous modules, missing local targets, and deeper re-exports are not
-guessed. When statically recognizable on a reachable path, they enter the
+guessed. Decorated reachable helpers, direct local-class dispatch, and nested or
+module helper callbacks are included in that fail-closed ledger. Direct helpers
+that write a declared `global` or `nonlocal` binding are also unresolved because
+the caller's binding state is not propagated across the edge. When statically
+recognizable on a reachable path, they enter the
 unresolved-edge ledger. Low-level Tool lists, `add_tool`, and nested/class-owned
 registration forms are counted as potential registrations but are not claimed as
 analyzed tools.

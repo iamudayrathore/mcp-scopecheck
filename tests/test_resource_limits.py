@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import io
 import tempfile
 import unittest
@@ -9,7 +10,10 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from mcp_scopecheck.analyzer import _execution
+from mcp_scopecheck.auditor import audit
 from mcp_scopecheck.cli import main
+from mcp_scopecheck.models import AnalysisStatus, UnresolvedReason
 from mcp_scopecheck.parser import ParseTargetError, parse_project
 
 
@@ -98,6 +102,64 @@ class ResourceLimitTests(unittest.TestCase):
             stdout.getvalue(),
         )
         self.assertIn("audit incomplete because diagnostics were reported", stderr.getvalue())
+
+    def test_binding_state_work_is_bounded_and_fails_closed(self) -> None:
+        source = "\n".join(
+            [
+                "import alpha, beta, gamma, delta",
+                "@mcp.tool()",
+                "def example(value):",
+                "    if value:",
+                "        import subprocess as process",
+                "    else:",
+                "        process = None",
+                "    return process.run(value)",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "server.py").write_text(source, encoding="utf-8")
+            with patch("mcp_scopecheck.parser.MAX_BINDING_STATE_WORK", 3):
+                project = parse_project(root)
+            with patch("mcp_scopecheck.analyzer.MAX_BINDING_STATE_WORK", 5):
+                report = audit(root)
+
+        self.assertEqual(len(project.diagnostics), 1)
+        self.assertIn(
+            "binding-state work exceeds maximum of 3 entries",
+            project.diagnostics[0].message,
+        )
+        self.assertEqual(report.completeness.status, AnalysisStatus.FAILED)
+        self.assertIn(
+            UnresolvedReason.GRAPH_RESOURCE_BUDGET,
+            {edge.reason for edge in report.completeness.unresolved_edges},
+        )
+
+    def test_unchanged_import_bindings_reuse_one_snapshot(self) -> None:
+        calls = "\n".join(f"    external_{index}()" for index in range(50))
+        source = (
+            "import alpha, beta, gamma, delta\n"
+            "@mcp.tool()\n"
+            "def example():\n"
+            f"{calls}\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "server.py").write_text(source, encoding="utf-8")
+            project = parse_project(root)
+            tool = project.tools[0]
+            result = _execution(project.tool_functions[tool.key], project)
+
+        body_calls = [
+            node
+            for node in result.nodes
+            if isinstance(node, ast.Call) and getattr(node, "lineno", 0) > tool.line_number
+        ]
+        self.assertEqual(len(body_calls), 50)
+        self.assertEqual(
+            len({id(result.imports_for(call)) for call in body_calls}),
+            1,
+        )
 
     def test_in_root_directory_symlink_to_outside_is_never_scanned(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

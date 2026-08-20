@@ -76,11 +76,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: iamudayrathore/mcp-scopecheck@a0e7cf0e0ed614e6696e173fbb7d28867417c133
+      - uses: iamudayrathore/mcp-scopecheck@741838a0934bc18dabc44043ad8af32d918cbab8
         with:
           target: path/to/python/server
           fail-on: high
-          version: "0.2.2"      # scanner version, independent of the pin above
+          version: "0.2.3"      # scanner version, independent of the pin above
       - uses: github/codeql-action/upload-sarif@<pinned-sha>
         if: always()
         with:
@@ -187,6 +187,8 @@ v0.2 intentionally supports:
 
 - Local Python files/directories
 - Module-level `@mcp.tool`, `@mcp.tool()`, and equivalent `.tool` decorators
+- Exact decorated-function identity when a later definition reuses the same Python
+  name
 - Direct same-file module and nested sync/async helper-call reachability
 - Static relative and absolute in-root Python imports
 - Direct imported-function calls, import aliases, qualified local-module function
@@ -194,6 +196,14 @@ v0.2 intentionally supports:
 - Cross-module filesystem, environment, network, process, and dynamic-code
   capability reachability with shortest source paths
 - Module-level and function-local import aliases with statement-order shadowing
+- Static `True`/`False` module and function branches plus fail-closed unresolved
+  edges when compound control flow leaves a called import, path, client, or nested
+  function binding ambiguous, including abrupt loop exits, exception prefixes,
+  suppressing context managers, guarded match cases, short-circuit expressions,
+  conditional values, and enclosing-scope assignment expressions
+- Definition-time tool defaults, decorators, and non-deferred annotations; calls
+  through definition-time local helper names fail closed rather than guessing which
+  function object existed at that point
 - Explicit module-level `httpx`, `requests`, and `requests.api` request functions,
   `urllib.request.urlopen`/`urlretrieve`, `socket.create_connection`, and request
   methods on flow-proven `httpx.Client`, `httpx.AsyncClient`, `requests.Session`,
@@ -260,7 +270,8 @@ Audits fail with exit `2` when fixed safety limits are exceeded:
 levels, 100 retained diagnostics, 2,000 participating local modules, 20,000
 resolved local edges, 256 reachable functions per tool, 32 cross-module hops per
 tool, 1,000 capability paths per tool, 1,000 unresolved edges, or 1,000 potential
-registrations. A symlink supplied as the target is rejected;
+registrations, or 250,000 binding-state work entries per module or reachable
+function. A symlink supplied as the target is rejected;
 symlinked files and directories encountered inside a directory target are
 skipped without following them.
 

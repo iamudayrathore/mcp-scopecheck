@@ -46,6 +46,7 @@ MAX_METADATA_DEPTH = 12
 MAX_METADATA_STRING_BYTES = 16_384
 MAX_METADATA_INTEGER_BITS = 256
 MAX_METADATA_COLLECTION_ITEMS = 128
+MAX_BINDING_STATE_WORK = 250_000
 
 MetadataValue: TypeAlias = (
     None
@@ -80,6 +81,19 @@ class MetadataDecodeError(ValueError):
 
 class AnalysisBudgetExceeded(ValueError):
     """Raised internally when a total static-analysis budget is exhausted."""
+
+
+@dataclass
+class _BindingWorkBudget:
+    entries: int = 0
+
+    def consume(self, entries: int) -> None:
+        self.entries += entries
+        if self.entries > MAX_BINDING_STATE_WORK:
+            raise AnalysisBudgetExceeded(
+                "analysis incomplete: binding-state work exceeds maximum of "
+                f"{MAX_BINDING_STATE_WORK:,} entries"
+            )
 
 
 class SourceDecodeError(ValueError):
@@ -129,6 +143,15 @@ class FunctionRecord:
     path_bindings: frozenset[str] = frozenset()
     client_bindings: dict[str, str] = field(default_factory=dict)
     wildcard_imports: tuple[tuple[int, str], ...] = ()
+    ambiguous_bindings: frozenset[str] = frozenset()
+    definition_imports: dict[str, str] | None = None
+    definition_path_bindings: frozenset[str] = frozenset()
+    definition_ambiguous_bindings: frozenset[str] = frozenset()
+    wrapper_decorators: tuple[ast.expr, ...] = ()
+    analyze_definition_expressions: bool = False
+    class_bindings: frozenset[str] = frozenset()
+    annotations_deferred: bool = False
+    outer_scope_writes: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -139,6 +162,7 @@ class ParsedProject:
     files_scanned: int = 0
     tools: list[ToolDefinition] = field(default_factory=list)
     functions: dict[tuple[str, str], FunctionRecord] = field(default_factory=dict)
+    tool_functions: dict[str, FunctionRecord] = field(default_factory=dict)
     diagnostics: list[Diagnostic] = field(default_factory=list)
     potential_registrations: list[PotentialRegistration] = field(default_factory=list)
     module_files: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -589,26 +613,597 @@ def _relative_import_name(node: ast.ImportFrom, item: ast.alias) -> str:
     return f"{base}{separator}{item.name}" if base else item.name
 
 
-def _imports(tree: ast.Module) -> dict[str, str]:
+@dataclass
+class _ModuleBindingState:
+    aliases: dict[str, str] = field(default_factory=dict)
+    paths: set[str] = field(default_factory=set)
+    ambiguous: set[str] = field(default_factory=set)
+    wildcard_imports: set[tuple[int, str]] = field(default_factory=set)
+    budget: _BindingWorkBudget = field(default_factory=_BindingWorkBudget)
+    annotations_deferred: bool = False
+
+    def clone(self) -> _ModuleBindingState:
+        self.budget.consume(
+            len(self.aliases)
+            + len(self.paths)
+            + len(self.ambiguous)
+            + len(self.wildcard_imports)
+        )
+        return _ModuleBindingState(
+            dict(self.aliases),
+            set(self.paths),
+            set(self.ambiguous),
+            set(self.wildcard_imports),
+            self.budget,
+            self.annotations_deferred,
+        )
+
+
+@dataclass
+class _StatementEffects:
+    bound_names: set[str] = field(default_factory=set)
+    has_break: bool = False
+    has_continue: bool = False
+
+
+class _StatementEffectsVisitor(ast.NodeVisitor):
+    """Collect bindings and abrupt loop exits without entering deferred scopes."""
+
+    def __init__(self) -> None:
+        self.effects = _StatementEffects()
+        self.loop_depth = 0
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            self.effects.bound_names.add(node.id)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for item in node.names:
+            self.effects.bound_names.add(item.asname or item.name.split(".")[0])
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for item in node.names:
+            if item.name != "*":
+                self.effects.bound_names.add(item.asname or item.name)
+
+    def _visit_definition_expressions(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> None:
+        self.effects.bound_names.add(node.name)
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for default in [*node.args.defaults, *node.args.kw_defaults]:
+            if default is not None:
+                self.visit(default)
+        arguments = [
+            *node.args.posonlyargs,
+            *node.args.args,
+            *node.args.kwonlyargs,
+        ]
+        if node.args.vararg is not None:
+            arguments.append(node.args.vararg)
+        if node.args.kwarg is not None:
+            arguments.append(node.args.kwarg)
+        for argument in arguments:
+            if argument.annotation is not None:
+                self.visit(argument.annotation)
+        if node.returns is not None:
+            self.visit(node.returns)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_definition_expressions(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_definition_expressions(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        for default in [*node.args.defaults, *node.args.kw_defaults]:
+            if default is not None:
+                self.visit(default)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.effects.bound_names.add(node.name)
+        for expression in [*node.decorator_list, *node.bases]:
+            self.visit(expression)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+
+    def _visit_nested_loop(
+        self,
+        iterator_or_test: ast.AST,
+        target: ast.AST | None,
+        body: list[ast.stmt],
+        orelse: list[ast.stmt],
+    ) -> None:
+        self.visit(iterator_or_test)
+        if target is not None:
+            self.visit(target)
+        self.loop_depth += 1
+        for statement in [*body, *orelse]:
+            self.visit(statement)
+        self.loop_depth -= 1
+
+    def visit_For(self, node: ast.For) -> None:
+        self._visit_nested_loop(node.iter, node.target, node.body, node.orelse)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self._visit_nested_loop(node.iter, node.target, node.body, node.orelse)
+
+    def visit_While(self, node: ast.While) -> None:
+        self._visit_nested_loop(node.test, None, node.body, node.orelse)
+
+    def visit_Break(self, node: ast.Break) -> None:
+        if self.loop_depth == 0:
+            self.effects.has_break = True
+
+    def visit_Continue(self, node: ast.Continue) -> None:
+        if self.loop_depth == 0:
+            self.effects.has_continue = True
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self.visit(node.generators[0].iter)
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self.visit(node.generators[0].iter)
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self.visit(node.generators[0].iter)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self.visit(node.generators[0].iter)
+
+
+def _statement_effects(statements: list[ast.stmt]) -> _StatementEffects:
+    visitor = _StatementEffectsVisitor()
+    for statement in statements:
+        visitor.visit(statement)
+    return visitor.effects
+
+
+class _OuterScopeDeclarationVisitor(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+
+    def visit_Global(self, node: ast.Global) -> None:
+        self.names.update(node.names)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        self.names.update(node.names)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        return
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        return
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+
+def _outer_scope_writes(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> frozenset[str]:
+    declarations = _OuterScopeDeclarationVisitor()
+    for statement in node.body:
+        declarations.visit(statement)
+    return frozenset(
+        declarations.names & _statement_effects(node.body).bound_names
+    )
+
+
+def _named_expression_names(node: ast.AST | None) -> set[str]:
+    if node is None:
+        return set()
+    return {
+        name
+        for child in ast.walk(node)
+        if isinstance(child, ast.NamedExpr)
+        for name in _module_assigned_names(child.target)
+    }
+
+
+def _module_assigned_names(node: ast.AST) -> set[str]:
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, ast.Starred):
+        return _module_assigned_names(node.value)
+    if isinstance(node, (ast.List, ast.Tuple)):
+        return {
+            name
+            for item in node.elts
+            for name in _module_assigned_names(item)
+        }
+    return set()
+
+
+def _set_module_binding(
+    state: _ModuleBindingState,
+    name: str,
+    value: str,
+    *,
+    is_path: bool = False,
+) -> None:
+    state.aliases[name] = value
+    state.paths.discard(name)
+    if is_path:
+        state.paths.add(name)
+    state.ambiguous.discard(name)
+
+
+def _join_module_states(states: list[_ModuleBindingState]) -> _ModuleBindingState:
+    if not states:
+        return _ModuleBindingState()
+    budget = states[0].budget
+    budget.consume(
+        sum(
+            len(state.aliases)
+            + len(state.paths)
+            + len(state.ambiguous)
+            + len(state.wildcard_imports)
+            for state in states
+        )
+    )
+    missing = object()
     aliases: dict[str, str] = {}
-    for node in tree.body:
+    paths = set.intersection(*(state.paths for state in states))
+    ambiguous = set().union(*(state.ambiguous for state in states))
+    wildcard_imports = set().union(*(state.wildcard_imports for state in states))
+    names = set().union(*(state.aliases.keys() for state in states))
+    for name in names:
+        values = [state.aliases.get(name, missing) for state in states]
+        first = values[0]
+        if all(value == first for value in values) and first is not missing:
+            aliases[name] = first  # type: ignore[assignment]
+        else:
+            aliases[name] = ""
+            ambiguous.add(name)
+        if any((name in state.paths) != (name in states[0].paths) for state in states[1:]):
+            ambiguous.add(name)
+    return _ModuleBindingState(
+        aliases,
+        paths,
+        ambiguous,
+        wildcard_imports,
+        budget,
+        states[0].annotations_deferred,
+    )
+
+
+def _mark_module_bindings_ambiguous(
+    state: _ModuleBindingState,
+    names: set[str],
+) -> None:
+    for name in names:
+        state.aliases[name] = ""
+        state.paths.discard(name)
+        state.ambiguous.add(name)
+
+
+def _mark_module_expression_bindings(
+    state: _ModuleBindingState,
+    expressions: Iterable[ast.AST | None],
+) -> None:
+    names = {
+        name
+        for expression in expressions
+        for name in _named_expression_names(expression)
+    }
+    _mark_module_bindings_ambiguous(state, names)
+
+
+def _module_path_options(
+    value: ast.AST,
+    state: _ModuleBindingState,
+) -> set[bool]:
+    if isinstance(value, ast.IfExp):
+        return _module_path_options(value.body, state) | _module_path_options(
+            value.orelse,
+            state,
+        )
+    if isinstance(value, ast.BoolOp):
+        return {
+            option
+            for item in value.values
+            for option in _module_path_options(item, state)
+        }
+    return {_is_path_expression(value, state.aliases, state.paths)}
+
+
+def _module_import_references(
+    value: ast.AST,
+    state: _ModuleBindingState,
+) -> set[str]:
+    if isinstance(value, ast.IfExp):
+        return _module_import_references(value.body, state) | _module_import_references(
+            value.orelse,
+            state,
+        )
+    if isinstance(value, ast.BoolOp):
+        return {
+            reference
+            for item in value.values
+            for reference in _module_import_references(item, state)
+        }
+    base = value
+    while isinstance(base, ast.Attribute):
+        base = base.value
+    if not isinstance(base, ast.Name) or base.id not in state.aliases:
+        return set()
+    return {_import_qualified_name(value, state.aliases)}
+
+
+def _module_structured_binding(
+    value: ast.AST,
+    state: _ModuleBindingState,
+) -> bool:
+    if not isinstance(value, (ast.List, ast.Tuple)):
+        return False
+    elements = [
+        child
+        for child in ast.walk(value)
+        if not isinstance(child, (ast.List, ast.Tuple, ast.Load, ast.Store))
+    ]
+    return any(
+        True in _module_path_options(element, state)
+        or bool(_module_import_references(element, state))
+        for element in elements
+    )
+
+
+def _module_bindings_for_statements(
+    statements: list[ast.stmt],
+    initial: _ModuleBindingState | None = None,
+    *,
+    direct_module_body: bool = False,
+    definition_states: dict[int, _ModuleBindingState] | None = None,
+) -> _ModuleBindingState:
+    state = initial.clone() if initial is not None else _ModuleBindingState()
+    for node in statements:
         if isinstance(node, ast.Import):
             for item in node.names:
                 bound_name = item.asname or item.name.split(".")[0]
-                aliases[bound_name] = item.name if item.asname else bound_name
+                _set_module_binding(
+                    state,
+                    bound_name,
+                    item.name if item.asname else bound_name,
+                )
         elif isinstance(node, ast.ImportFrom):
             for item in node.names:
-                aliases[item.asname or item.name] = _relative_import_name(node, item)
+                if item.name == "*":
+                    state.wildcard_imports.add(
+                        (_node_line_number(node), node.module or "." * node.level)
+                    )
+                    continue
+                _set_module_binding(
+                    state,
+                    item.asname or item.name,
+                    _relative_import_name(node, item),
+                )
         elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            value = node.value if isinstance(node, (ast.Assign, ast.AnnAssign)) else None
+            _mark_module_expression_bindings(state, [node.value])
+            path_options = (
+                _module_path_options(value, state) if value is not None else set()
+            )
+            import_references = (
+                _module_import_references(value, state) if value is not None else set()
+            )
+            structured_target = any(
+                isinstance(target, (ast.List, ast.Tuple)) for target in targets
+            )
+            structured_binding = (
+                structured_target
+                and value is not None
+                and _module_structured_binding(value, state)
+            )
+            is_path = value is not None and _is_path_expression(
+                value,
+                state.aliases,
+                state.paths,
+            )
             for target in targets:
-                if isinstance(target, ast.Name):
-                    aliases[target.id] = ""
+                for name in _module_assigned_names(target):
+                    _set_module_binding(state, name, "", is_path=is_path)
+            if (
+                len(path_options) > 1
+                or import_references
+                or structured_binding
+            ):
+                _mark_module_bindings_ambiguous(
+                    state,
+                    {
+                        name
+                        for target in targets
+                        for name in _module_assigned_names(target)
+                    },
+                )
+        elif isinstance(node, ast.Delete):
+            for target in node.targets:
+                for name in _module_assigned_names(target):
+                    _set_module_binding(state, name, "")
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            aliases.pop(node.name, None)
+            if direct_module_body:
+                if definition_states is not None:
+                    definition_states[id(node)] = state.clone()
+                _mark_module_expression_bindings(
+                    state,
+                    [
+                        *node.decorator_list,
+                        *node.args.defaults,
+                        *node.args.kw_defaults,
+                        *(
+                            []
+                            if state.annotations_deferred
+                            else [
+                                *[
+                                    argument.annotation
+                                    for argument in [
+                                        *node.args.posonlyargs,
+                                        *node.args.args,
+                                        *node.args.kwonlyargs,
+                                    ]
+                                ],
+                                node.args.vararg.annotation if node.args.vararg else None,
+                                node.args.kwarg.annotation if node.args.kwarg else None,
+                                node.returns,
+                            ]
+                        ),
+                    ],
+                )
+                state.aliases.pop(node.name, None)
+                state.paths.discard(node.name)
+                state.ambiguous.discard(node.name)
+            else:
+                _set_module_binding(state, node.name, "")
+                state.ambiguous.add(node.name)
         elif isinstance(node, ast.ClassDef):
-            aliases[node.name] = ""
-    return aliases
+            _mark_module_expression_bindings(
+                state,
+                [
+                    *node.decorator_list,
+                    *node.bases,
+                    *[keyword.value for keyword in node.keywords],
+                ],
+            )
+            _set_module_binding(state, node.name, "")
+            if not direct_module_body:
+                state.ambiguous.add(node.name)
+        elif isinstance(node, ast.If):
+            _mark_module_expression_bindings(state, [node.test])
+            if isinstance(node.test, ast.Constant) and isinstance(node.test.value, bool):
+                selected = node.body if node.test.value else node.orelse
+                state = _module_bindings_for_statements(selected, state)
+            else:
+                state = _join_module_states(
+                    [
+                        _module_bindings_for_statements(node.body, state),
+                        _module_bindings_for_statements(node.orelse, state),
+                    ]
+                )
+        elif isinstance(node, (ast.Try, ast.TryStar)):
+            success = _module_bindings_for_statements(node.body, state)
+            success = _module_bindings_for_statements(node.orelse, success)
+            merged = success
+            try_effects = _statement_effects(node.body)
+            handler_entry = state.clone()
+            _mark_module_bindings_ambiguous(
+                handler_entry,
+                try_effects.bound_names,
+            )
+            for handler in node.handlers:
+                handler_state = handler_entry.clone()
+                if handler.name:
+                    _set_module_binding(handler_state, handler.name, "")
+                branch = _module_bindings_for_statements(handler.body, handler_state)
+                merged = _join_module_states([merged, branch])
+                if isinstance(node, ast.TryStar):
+                    handler_entry = _join_module_states([handler_entry, branch])
+            state = merged
+            state = _module_bindings_for_statements(node.finalbody, state)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+            _mark_module_expression_bindings(
+                state,
+                [node.iter if isinstance(node, (ast.For, ast.AsyncFor)) else node.test],
+            )
+            before_loop = state.clone()
+            loop_state = state.clone()
+            loop_effects = _statement_effects(node.body)
+            _mark_module_bindings_ambiguous(
+                loop_state,
+                loop_effects.bound_names,
+            )
+            if isinstance(node, (ast.For, ast.AsyncFor)):
+                for name in _module_assigned_names(node.target):
+                    _set_module_binding(loop_state, name, "")
+                    loop_effects.bound_names.add(name)
+            loop_state = _module_bindings_for_statements(node.body, loop_state)
+            exhausted = _join_module_states([before_loop, loop_state])
+            _mark_module_bindings_ambiguous(exhausted, loop_effects.bound_names)
+            exhausted = _module_bindings_for_statements(node.orelse, exhausted)
+            if loop_effects.has_break:
+                broken = loop_state.clone()
+                _mark_module_bindings_ambiguous(broken, loop_effects.bound_names)
+                state = _join_module_states([exhausted, broken])
+            else:
+                state = exhausted
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for with_item in node.items:
+                _mark_module_expression_bindings(state, [with_item.context_expr])
+                if with_item.optional_vars is None:
+                    continue
+                is_path = _is_path_expression(
+                    with_item.context_expr,
+                    state.aliases,
+                    state.paths,
+                )
+                for bound_name in _module_assigned_names(with_item.optional_vars):
+                    _set_module_binding(state, bound_name, "", is_path=is_path)
+            state = _module_bindings_for_statements(node.body, state)
+            _mark_module_bindings_ambiguous(
+                state,
+                _statement_effects(node.body).bound_names,
+            )
+        elif isinstance(node, ast.Match):
+            _mark_module_bindings_ambiguous(
+                state,
+                _named_expression_names(node.subject),
+            )
+            outcomes = state.clone()
+            fallthrough = state.clone()
+            for case in node.cases:
+                case_state = fallthrough.clone()
+                for pattern in ast.walk(case.pattern):
+                    pattern_name = getattr(pattern, "name", None)
+                    if isinstance(pattern_name, str):
+                        _set_module_binding(case_state, pattern_name, "")
+                _mark_module_bindings_ambiguous(
+                    case_state,
+                    _named_expression_names(case.guard),
+                )
+                guard_state = case_state.clone()
+                branch = _module_bindings_for_statements(case.body, case_state)
+                outcomes = _join_module_states([outcomes, branch])
+                if case.guard is not None:
+                    fallthrough = _join_module_states([fallthrough, guard_state])
+            state = _join_module_states([outcomes, fallthrough])
+        elif isinstance(node, ast.Expr):
+            _mark_module_expression_bindings(state, [node.value])
+        elif isinstance(node, ast.Assert):
+            _mark_module_expression_bindings(state, [node.test, node.msg])
+        elif isinstance(node, ast.Raise):
+            _mark_module_expression_bindings(state, [node.exc, node.cause])
+    return state
+
+
+def _imports(
+    tree: ast.Module,
+    annotations_deferred: bool,
+) -> tuple[
+    dict[str, str],
+    frozenset[str],
+    frozenset[str],
+    tuple[tuple[int, str], ...],
+    dict[int, _ModuleBindingState],
+]:
+    definition_states: dict[int, _ModuleBindingState] = {}
+    state = _module_bindings_for_statements(
+        tree.body,
+        _ModuleBindingState(annotations_deferred=annotations_deferred),
+        direct_module_body=True,
+        definition_states=definition_states,
+    )
+    return (
+        state.aliases,
+        frozenset(state.ambiguous),
+        frozenset(state.paths),
+        tuple(sorted(state.wildcard_imports)),
+        definition_states,
+    )
 
 
 def _import_qualified_name(node: ast.AST, imports: dict[str, str]) -> str:
@@ -645,31 +1240,6 @@ def _is_path_expression(
     }:
         return _is_path_expression(node.func.value, imports, path_bindings)
     return False
-
-
-def _module_path_bindings(tree: ast.Module, imports: dict[str, str]) -> frozenset[str]:
-    bindings: set[str] = set()
-    for node in tree.body:
-        targets: list[ast.AST] = []
-        value: ast.AST | None = None
-        if isinstance(node, ast.Assign):
-            targets = list(node.targets)
-            value = node.value
-        elif isinstance(node, ast.AnnAssign):
-            targets = [node.target]
-            value = node.value
-        if not targets:
-            continue
-        assigned = {
-            target.id
-            for target in targets
-            if isinstance(target, ast.Name)
-        }
-        is_path = value is not None and _is_path_expression(value, imports, bindings)
-        bindings.difference_update(assigned)
-        if is_path:
-            bindings.update(assigned)
-    return frozenset(bindings)
 
 
 def _candidate_files(target: Path) -> Iterable[Path]:
@@ -909,28 +1479,63 @@ def parse_project(target: str | Path) -> ParsedProject:
             _add_diagnostic(project, Diagnostic(relative, str(exc)))
             return _finish_project(project)
         total_ast_nodes += node_count
-
-        aliases = _imports(tree)
-        project.module_imports[relative] = aliases
-        path_bindings = _module_path_bindings(tree, aliases)
-        wildcard_imports = tuple(
-            (_node_line_number(node), node.module or "." * node.level)
-            for node in tree.body
-            if isinstance(node, ast.ImportFrom)
-            and any(item.name == "*" for item in node.names)
+        annotations_deferred = any(
+            isinstance(statement, ast.ImportFrom)
+            and statement.module == "__future__"
+            and any(item.name == "annotations" for item in statement.names)
+            for statement in tree.body
         )
+
+        try:
+            (
+                aliases,
+                ambiguous_bindings,
+                path_bindings,
+                wildcard_imports,
+                definition_states,
+            ) = _imports(tree, annotations_deferred)
+        except AnalysisBudgetExceeded as exc:
+            _add_diagnostic(project, Diagnostic(relative, str(exc)))
+            return _finish_project(project)
+        project.module_imports[relative] = aliases
         for node in tree.body:
             if isinstance(node, ast.ClassDef):
                 project.classes.add((relative, node.name))
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            project.functions[(relative, node.name)] = FunctionRecord(
+            definition_state = definition_states.get(id(node))
+            wrapper_decorators = tuple(
+                decorator
+                for decorator in node.decorator_list
+                if not _is_tool_decorator(decorator)
+            )
+            record = FunctionRecord(
                 relative,
                 node,
                 aliases,
                 path_bindings,
                 wildcard_imports=wildcard_imports,
+                ambiguous_bindings=ambiguous_bindings,
+                definition_imports=(
+                    dict(definition_state.aliases)
+                    if definition_state is not None
+                    else None
+                ),
+                definition_path_bindings=(
+                    frozenset(definition_state.paths)
+                    if definition_state is not None
+                    else frozenset()
+                ),
+                definition_ambiguous_bindings=(
+                    frozenset(definition_state.ambiguous)
+                    if definition_state is not None
+                    else frozenset()
+                ),
+                wrapper_decorators=wrapper_decorators,
+                annotations_deferred=annotations_deferred,
+                outer_scope_writes=_outer_scope_writes(node),
             )
+            project.functions[(relative, node.name)] = record
             for decorator in node.decorator_list:
                 if not _is_tool_decorator(decorator):
                     continue
@@ -954,8 +1559,7 @@ def parse_project(target: str | Path) -> ParsedProject:
                         ),
                     ):
                         return _finish_project(project)
-                project.tools.append(
-                    ToolDefinition(
+                tool = ToolDefinition(
                         name=name,
                         function_name=node.name,
                         description=description,
@@ -970,7 +1574,9 @@ def parse_project(target: str | Path) -> ParsedProject:
                             if item is not decorator
                         ),
                     )
-                )
+                project.tools.append(tool)
+                project.tool_functions[tool.key] = record
+                record.analyze_definition_expressions = True
                 break
 
         project.potential_registrations.extend(_potential_registrations(tree, relative))
