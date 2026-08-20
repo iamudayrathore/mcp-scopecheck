@@ -5,6 +5,9 @@
 [![CI](https://github.com/iamudayrathore/mcp-scopecheck/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/iamudayrathore/mcp-scopecheck/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/iamudayrathore/mcp-scopecheck/blob/main/LICENSE)
 
+<img width="2061" height="763" alt="mcpscopecheck" src="https://github.com/user-attachments/assets/6c2c1df8-2c3d-4820-b68c-7a65d8d26943" />
+
+
 **Inspect before you connect.** MCP ScopeCheck is a pre-install static auditor that compares a Python MCP tool's declared contract with security-relevant behavior reachable from its source—without importing or running the server.
 
 ## Quick start
