@@ -402,6 +402,113 @@ def main() -> int:
         f"resolved local helper was classified as builtin eval (exit {code})\n{out[-400:]}",
     )
 
+    definition_sink = validator.source(
+        "import subprocess\n"
+        "@mcp.tool()\n"
+        "def execute(result=subprocess.run(['fixed'])):\n"
+        "    return result\n"
+    )
+    code, out = validator.audit(definition_sink)
+    validator.check(
+        "definitions/default_expression_sink",
+        code == 1 and "MSC106" in out,
+        f"tool default expression was not analyzed (exit {code})\n{out[-400:]}",
+    )
+
+    loop_break = validator.source(
+        "import math\n"
+        "@mcp.tool()\n"
+        "def execute(command, items):\n"
+        "    process = math\n"
+        "    for item in items:\n"
+        "        import subprocess as process\n"
+        "        break\n"
+        "    else:\n"
+        "        process = math\n"
+        "    return process.run(command, shell=True)\n"
+    )
+    code, out = validator.audit(loop_break)
+    validator.check(
+        "bindings/loop_break_fails_closed",
+        code == 2 and "ambiguous control-flow binding" in out,
+        f"loop break path produced a clean audit (exit {code})\n{out[-400:]}",
+    )
+
+    structured_assignment = validator.source(
+        "from pathlib import Path\n"
+        "@mcp.tool()\n"
+        "def read():\n"
+        "    root = Path('/')\n"
+        "    root, other = root, None\n"
+        "    return root.read_text()\n"
+    )
+    code, out = validator.audit(structured_assignment)
+    validator.check(
+        "bindings/structured_assignment_fails_closed",
+        code == 2 and "ambiguous control-flow binding" in out,
+        f"structured path assignment produced a clean audit (exit {code})\n{out[-400:]}",
+    )
+
+    wrapped_helper = validator.source(
+        "def replace(function):\n"
+        "    return eval\n"
+        "@replace\n"
+        "def calculate(value):\n"
+        "    return value\n"
+        "@mcp.tool()\n"
+        "def entry(value):\n"
+        "    return calculate(value)\n"
+    )
+    code, out = validator.audit(wrapped_helper)
+    validator.check(
+        "resolution/wrapped_helper_fails_closed",
+        code == 2 and "wrapper/decorator indirection" in out,
+        f"wrapped helper was followed as raw source (exit {code})\n{out[-400:]}",
+    )
+
+    nested_callback = validator.source(
+        "@mcp.tool()\n"
+        "def entry(pool, value):\n"
+        "    def callback():\n"
+        "        return value\n"
+        "    return pool.submit(callback)\n"
+    )
+    code, out = validator.audit(nested_callback)
+    validator.check(
+        "resolution/nested_callback_fails_closed",
+        code == 2 and "higher-order call" in out,
+        f"nested callback was omitted from completeness (exit {code})\n{out[-400:]}",
+    )
+
+    direct_lambda = validator.source(
+        "@mcp.tool()\n"
+        "def entry(value):\n"
+        "    return (lambda: value)()\n"
+    )
+    code, out = validator.audit(direct_lambda)
+    validator.check(
+        "resolution/direct_lambda_call_fails_closed",
+        code == 2 and "higher-order call" in out,
+        f"direct lambda call was omitted from completeness (exit {code})\n{out[-400:]}",
+    )
+
+    nonlocal_write = validator.source(
+        "@mcp.tool()\n"
+        "def entry():\n"
+        "    value = 'before'\n"
+        "    def update():\n"
+        "        nonlocal value\n"
+        "        value = 'after'\n"
+        "    update()\n"
+        "    return value\n"
+    )
+    code, out = validator.audit(nonlocal_write)
+    validator.check(
+        "resolution/nonlocal_state_fails_closed",
+        code == 2 and "outer-scope state mutation" in out,
+        f"nonlocal helper mutation was omitted (exit {code})\n{out[-400:]}",
+    )
+
     # Documented blind spot, pinned so a change is deliberate rather than silent:
     # a path stored in a container and retrieved by subscript is not tracked. See
     # docs/limitations.md. Treating a subscript as a path invented filesystem

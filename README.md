@@ -198,7 +198,12 @@ v0.2 intentionally supports:
 - Module-level and function-local import aliases with statement-order shadowing
 - Static `True`/`False` module and function branches plus fail-closed unresolved
   edges when compound control flow leaves a called import, path, client, or nested
-  function binding ambiguous
+  function binding ambiguous, including abrupt loop exits, exception prefixes,
+  suppressing context managers, guarded match cases, short-circuit expressions,
+  conditional values, and enclosing-scope assignment expressions
+- Definition-time tool defaults, decorators, and non-deferred annotations; calls
+  through definition-time local helper names fail closed rather than guessing which
+  function object existed at that point
 - Explicit module-level `httpx`, `requests`, and `requests.api` request functions,
   `urllib.request.urlopen`/`urlretrieve`, `socket.create_connection`, and request
   methods on flow-proven `httpx.Client`, `httpx.AsyncClient`, `requests.Session`,
@@ -265,7 +270,8 @@ Audits fail with exit `2` when fixed safety limits are exceeded:
 levels, 100 retained diagnostics, 2,000 participating local modules, 20,000
 resolved local edges, 256 reachable functions per tool, 32 cross-module hops per
 tool, 1,000 capability paths per tool, 1,000 unresolved edges, or 1,000 potential
-registrations. A symlink supplied as the target is rejected;
+registrations, or 250,000 binding-state work entries per module or reachable
+function. A symlink supplied as the target is rejected;
 symlinked files and directories encountered inside a directory target are
 skipped without following them.
 

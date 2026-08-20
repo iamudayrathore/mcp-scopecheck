@@ -9,6 +9,10 @@
   function control flow leaves an import, path, client, or nested-function binding
   ambiguous at a reachable call. These cases now produce an explicit unresolved
   edge, partial completeness, and exit `2` instead of a complete clean audit.
+  Conservative joins cover loop-carried and abrupt-exit paths, exception prefixes,
+  suppressing context managers, sequential `except*` handlers, and failed match
+  guards, plus conditional/short-circuit expressions, chained comparisons, and
+  enclosing-scope assignment expressions and structured assignments.
 - Do not classify calls already proven to target project-local functions as
   built-in or third-party capability sinks. A benign same-file helper named `eval`
   no longer produces a false Critical `MSC107` finding; the helper body remains
@@ -16,8 +20,16 @@
 - Added unit and installed-wheel behavioural regressions for duplicate registered
   function names, compound-statement imports, ambiguous control-flow bindings, and
   local helpers whose names collide with modeled sinks.
+- Analyze modeled sinks in tool defaults, decorators, and non-deferred annotations;
+  fail closed for definition-time local helper calls, decorated reachable helpers,
+  local-class dispatch, nested callbacks, and callable expressions that cannot be
+  justified statically, plus helpers that write declared `global` or `nonlocal`
+  bindings whose state is not propagated to the caller.
+- Reuse immutable import snapshots, stream branch joins, and enforce a 250,000-entry
+  binding-state work limit per module or reachable function to bound adversarial
+  memory and CPU growth.
 - No change to the no-target-execution invariant, runtime dependency boundary,
-  rule catalogue, SARIF schema, resource limits, or exit-code contract.
+  rule catalogue, SARIF schema, or exit-code contract.
 
 ## 0.2.2 - 2026-08-20
 

@@ -32,11 +32,19 @@ statically recognizable:
 - class and instance dispatch;
 - callbacks, closures, lambdas, partials, assigned function aliases, and other
   higher-order calls;
+- direct helpers that write a declared `global` or `nonlocal` binding;
 - wrapper or decorator transformations;
 - wildcard and dynamic imports;
 - ambiguous or missing local targets and deeper re-export chains;
 - runtime, low-level Tool-list, `add_tool`, nested, and class-owned registration
   forms.
+
+Definition-time calls through project-local helper names are also unresolved. A
+later definition can reuse the same module name, so the final name table does not
+prove which function object a default, decorator, or annotation called while the
+tool was being defined. Direct modeled sinks in these expressions are still
+reported. Annotations are not evaluated when `from __future__ import annotations`
+defers them.
 
 ## Rule boundaries
 
@@ -93,8 +101,20 @@ Control-flow handling is a bounded binding analysis, not path-sensitive executio
 Literal boolean branches are selected statically. At modeled `if`, loop,
 `try`/`except`, `except*`, and `match` joins, a binding used as a reachable call
 target is resolved only when the analyzed paths agree; disagreement is reported as
-an unresolved edge and makes the audit partial. This does not prove which runtime
-path executes or infer the capability of an ambiguous receiver.
+an unresolved edge and makes the audit partial. Loop-carried writes, `break` and
+`continue` prefixes, exception prefixes, exception-suppressing context managers,
+sequential `except*` handlers, and side effects from failed match guards are kept
+ambiguous until a definite later assignment replaces them. Conditional values,
+short-circuit boolean expressions, chained comparisons, loop-carried tests, and
+comprehension assignment expressions use the same conservative join. Assigning an
+imported module or local class/helper object to another name is treated as
+unresolved aliasing rather than a proven direct binding. This does not prove which
+runtime path executes or infer the capability of an ambiguous receiver.
+
+Binding-state copying and comparison is limited to 250,000 work entries per module
+or reachable function. Exceeding that bound makes the audit incomplete with exit
+`2`; unchanged import environments reuse one immutable snapshot rather than one
+full map per AST event.
 
 For the same reason `str(path)` yields a string, not a path: `str.replace` and
 `Path.replace` share a name, and the latter renames a file.
