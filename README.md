@@ -78,7 +78,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: iamudayrathore/mcp-scopecheck@94fc1b2296dab61ea67ad7dfbda244a85186c8a9 # v0.2.1
+      - uses: iamudayrathore/mcp-scopecheck@94fc1b2296dab61ea67ad7dfbda244a85186c8a9
         with:
           target: path/to/python/server
           fail-on: high
@@ -93,7 +93,8 @@ mutable, and git tags are mutable too - a tag can be moved to point at different
 code, which is how the `tj-actions/changed-files` compromise reached thousands of
 workflows in March 2025. A 40-character SHA is content-addressed and cannot be
 repointed. ScopeCheck enforces the same rule on itself: a test fails the build if
-any action in this repository is pinned by anything other than a full SHA.
+any action used by this repository's workflows or by this action is pinned by
+anything other than a full SHA.
 
 Release tags in this repository are additionally protected against updates and
 deletions, but pin the SHA regardless - do not extend trust to a tag in any

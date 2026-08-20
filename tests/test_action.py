@@ -55,6 +55,28 @@ class ActionPolicyTests(unittest.TestCase):
         audit = self.text[self.text.index("id: audit") :]
         self.assertLess(audit.index("set +e"), audit.index("scopecheck_exit=$?"))
 
+    def test_every_workflow_and_action_pins_third_party_actions_by_sha(self) -> None:
+        """The README claims this rule is enforced repository-wide, so enforce it.
+
+        `test_release_workflow` covers only release.yml and the check above covers
+        only action.yml, which left ci.yml unenforced while the README claimed
+        otherwise. Local `./` references are self-references, not third-party
+        supply chain, so they are exempt.
+        """
+
+        sources = sorted((ROOT / ".github" / "workflows").glob("*.yml")) + [ACTION]
+        self.assertGreaterEqual(len(sources), 3)
+        checked = 0
+        for source in sources:
+            text = source.read_text(encoding="utf-8")
+            for action in re.findall(r"(?m)^\s+-?\s*uses:\s*([^\s#]+)", text):
+                if action == "./":
+                    continue
+                checked += 1
+                with self.subTest(source=source.name, action=action):
+                    self.assertRegex(action, r"^[^@]+@[0-9a-f]{40}$")
+        self.assertGreater(checked, 0)
+
     def test_readme_pins_this_action_by_full_commit_sha(self) -> None:
         """The published usage example must not teach a mutable ref.
 
