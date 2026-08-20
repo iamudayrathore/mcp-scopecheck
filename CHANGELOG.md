@@ -46,6 +46,32 @@ not.
 - README, `docs/architecture.md`, and `docs/limitations.md` now describe the model
   the code implements. The previous text asserted that guards intersect at joins,
   which had not been true since 0.2.3.
+- Fixed a capability vanishing entirely when a path reached a filesystem call by a
+  route the analyzer did not model. A path returned from a local helper, taken out
+  of a container, or handed to a callback produced `Observed: none` under a
+  `complete` audit - an arbitrary caller-controlled write reported as a tool with no
+  capabilities at all. Present in 0.2.1 and every unpublished release since.
+- Added `visit_While` to the path-flow visitor. A containment check inside a loop
+  body that may never execute was kept unconditionally; every other construct
+  already merged against the not-taken path.
+- A `finally` block containing `return`, `break`, or `continue` now drops what the
+  try body proved, because such a transfer discards an in-flight exception exactly
+  as `except: pass` would.
+- An `assert` no longer establishes containment; `python -O` strips it.
+- An escape is recorded for a method call on a local object whether or not its
+  result is bound. `d.__setitem__(k, p)` degraded the audit while
+  `x = d.__setitem__(k, p)` did not, and binding the result is the realistic form
+  for `pool.submit(...)`.
+- `target.parent`, `target.glob`/`iterdir`/`rglob` children, and
+  `target.with_suffix(...)` preserve containment. Requiring proof to survive every
+  derivation had made the shapes MSC103's own remediation recommends - validate a
+  directory then iterate it, validate a file then write beside it - report as
+  unconstrained. `with_name` is excluded: its argument can contain separators.
+- `scripts/validate_release.py` now asserts why a case was reported, not merely that
+  the exit was non-zero, and requires the fixture to have been analyzed at all. The
+  previous gate was satisfied 90/129 by a stub that only ever exited `2`; the
+  hardened gate fails 100 of 146 against that same stub. Grown to 146 checks with
+  capability-visibility cases and every reproduction from the fourth audit.
 - No change to the exit-code contract, the no-execution invariant, the resource
   limits, the SARIF schema, or the snapshot digest payload.
 

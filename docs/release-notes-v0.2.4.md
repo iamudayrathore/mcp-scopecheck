@@ -68,6 +68,45 @@ except ValueError:
 return target.read_text()          # clean, correctly
 ```
 
+## Found by the fourth audit, fixed here
+
+The guard rewrite held under 60 adversarial servers, but the audit found three
+ways to reach a clean verdict that predate this release, and one that did not.
+
+**A capability could vanish entirely.** A path returned from a local helper was
+not recognised as a path, so the sink was never registered:
+
+```python
+def _pick(value):
+    return value
+
+@mcp.tool()
+def write_note(name: str, body: str) -> str:
+    """Save a note."""
+    _pick(Path(name)).write_text(body)   # Observed: none, complete, exit 0
+```
+
+Arbitrary caller-controlled write, reported as a tool with no capabilities at
+all. A call receiving a path may return one, so this now fails closed; the same
+applies to a path taken back out of a container. A project-local function passed
+as a callback is recorded as an unresolved edge rather than disappearing.
+
+**Two guard forms could not constrain anything.** There was no `visit_While`, so
+a check inside a loop that may never run was kept unconditionally; and `finally:`
+containing `return` discards an in-flight exception, which the model did not know.
+An `assert` used as a check is now ignored too, because `python -O` strips it.
+
+**An escape depended on discarding the result.** `d.__setitem__(k, p)` degraded
+the audit but `x = d.__setitem__(k, p)` did not, and binding the result is the
+realistic spelling for `pool.submit(...)`. A method call on a local object now
+records the escape either way.
+
+**Three false positives on correct containment** came from making containment
+harder to establish: `target.parent.mkdir(...)`, iterating `target.glob("*.md")`,
+and `target.with_suffix(".bak")` after a proven check. All stay beneath a
+validated root and are now preserving. `with_name` deliberately is not, because it
+takes a caller-supplied name that can contain separators.
+
 ## Also fixed
 
 **Untracked stores fail closed regardless of spelling.** `d[k] = p` already degraded
@@ -92,28 +131,33 @@ user copying the workflow would have run an action without the fix.
 
 ## Results
 
-`scripts/validate_release.py` runs **129 checks against an installed wheel**. All
-pass. The number that matters more:
+`scripts/validate_release.py` runs **146 checks against an installed wheel**. All
+pass. The differential matters more than the total:
 
 | Build | Result |
 | --- | ---: |
-| 0.2.4 (this release) | **129 pass, 0 fail** |
-| 0.2.3 unfixed | 112 pass, **17 fail** |
-| 0.2.1 published | 48 pass, **81 fail** |
+| 0.2.4 (this release) | **146 pass, 0 fail** |
+| 0.2.4 before the final audit's findings | 134 pass, **12 fail** |
+| 0.2.3 | 119 pass, **27 fail** |
+| 0.2.1 published | 55 pass, **91 fail** |
+| A stub that only ever exits `2` | 46 pass, **100 fail** |
 
-The same gate passed the unfixed 0.2.3 build 107/107. The new defeated-guard and
-untracked-store groups are what catch it, and every case in them is a reproduction
-from an audit rather than a case invented alongside the fix — which is the specific
-failure mode that let three releases through.
+That last row is the one that was missing. The previous gate asserted only that a
+dangerous case produced a non-zero exit, so a build that had stopped analyzing
+entirely would have satisfied 90 of its 129 checks. Cases now assert the *reason*:
+the tool must actually be discovered, and the verdict must name the filesystem-scope
+rule or its incompleteness notification. Asserting the wanted outcome instead of the
+reason for it is the same blind spot that let three releases through.
 
 | Group | Checks |
 | --- | ---: |
 | Path lineage | 34 |
-| Defeated guards | 9 |
-| Untracked stores | 7 |
+| Defeated guards | 12 |
+| Untracked stores | 8 |
+| Capability visibility | 6 |
 | Execution sinks | 46 |
-| Benign servers | 11 |
-| No-execution invariant | 4 |
+| Benign servers | 14 |
+| No-execution invariant | 8 |
 | Hostile input and limits | 9 |
 | Output forgery | 4 |
 | Exit-code contract | 3 |
@@ -138,9 +182,9 @@ Expect more findings and more `partial` results than 0.2.1 on unchanged source.
 
 ## Advisory
 
-`GHSA-jx85-6p69-j94f` should name **0.2.4** as the patched version. It was not
-amended to name 0.2.1, 0.2.2, or 0.2.3: the class it describes reproduced on all
-three by different mechanisms.
+`GHSA-jx85-6p69-j94f` names **0.2.4** as the patched version. It was not amended to
+name 0.2.1, 0.2.2, or 0.2.3: the class it describes reproduced on all three by
+different mechanisms, including through the capability-visibility gap closed here.
 
 ## Known limitations, unchanged
 

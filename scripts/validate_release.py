@@ -86,6 +86,30 @@ class Validator:
         return directory
 
     @staticmethod
+    def reported_for_the_right_reason(code: int, out: str) -> tuple[bool, str]:
+        """Whether a dangerous case was reported, and reported *because of itself*.
+
+        Asserting only a non-zero exit is not enough. A build that stopped analyzing
+        entirely - or that failed to parse the fixture at all - exits non-zero and
+        would satisfy such a check. This gate previously passed 90 of its 129 cases
+        against a stub that did nothing but `exit 2`, which is precisely the blind
+        spot it exists to prevent: asserting the outcome wanted rather than the
+        reason for it.
+
+        So require that the tool was actually discovered and analyzed, and that the
+        verdict names the filesystem-scope rule or its incompleteness notification.
+        """
+
+        if "1 MCP tool(s) discovered" not in out:
+            return False, "no tool was discovered; the fixture was not analyzed"
+        if code == 0:
+            return False, "reported clean"
+        named = "MSC103" in out or "MSC103-LINEAGE-UNPROVEN" in out
+        if not named:
+            return False, f"non-zero exit without naming a filesystem-scope reason\n{out[-300:]}"
+        return True, ""
+
+    @staticmethod
     def raw(content: bytes) -> Path:
         directory = Path(tempfile.mkdtemp())
         (directory / "server.py").write_bytes(content)
@@ -198,6 +222,24 @@ DEFEATED_GUARDS = {
         "    a.resolve().relative_to(ROOT)\n"
         "    b.read_text()"
     ),
+    "while_body_may_not_run": (
+        "    t = (ROOT / name).resolve()\n"
+        "    while t != t.resolve():\n"
+        "        t.relative_to(ROOT)\n"
+        "    t.read_text()"
+    ),
+    "finally_return_swallows": (
+        "    t = (ROOT / name).resolve()\n"
+        "    try:\n"
+        "        t.relative_to(ROOT)\n"
+        "    finally:\n"
+        "        return t.read_text()"
+    ),
+    "assert_is_stripped_under_O": (
+        "    t = (ROOT / name).resolve()\n"
+        "    assert t.relative_to(ROOT)\n"
+        "    t.read_text()"
+    ),
     "write_after_defeated_guard": (
         "    try:\n"
         "        t = ROOT / name\n"
@@ -228,6 +270,26 @@ UNTRACKED_STORES = {
     ),
     "attribute": (
         "    class Box:\n        t = None\n    Box.t = name\n    open(Box.t).read()"
+    ),
+    "bound_dunder_setitem": (
+        '    d = {}\n    x = d.__setitem__("t", ROOT / name)\n    open(d["t"]).read()'
+    ),
+}
+
+# Capability detection. A path that reaches a filesystem call must be observed even
+# when it arrives by a route the analyzer does not model. Reporting `Observed: none`
+# for a tool that writes an arbitrary caller-supplied path is an affirmative denial,
+# which is worse than reporting nothing.
+CAPABILITY_VISIBILITY = {
+    "path_through_local_helper": (
+        "    _pick(Path(name)).write_text('x')"
+    ),
+    "path_through_container": (
+        '    d = {"a": Path(name)}\n    d["a"].read_text()'
+    ),
+    "local_function_as_callback": (
+        "    import functools\n"
+        "    return functools.reduce(_pick, [Path(name)])"
     ),
 }
 
@@ -312,6 +374,22 @@ BENIGN = {
         '    results["hits"] = [name.upper()]\n'
         "    return results"
     ),
+    "guard_then_parent_mkdir": (
+        "    t = (ROOT / name).resolve()\n"
+        "    t.relative_to(ROOT)\n"
+        "    t.parent.mkdir(parents=True, exist_ok=True)\n"
+        '    t.write_text("x")'
+    ),
+    "guard_then_glob_children": (
+        "    t = (ROOT / name).resolve()\n"
+        "    t.relative_to(ROOT)\n"
+        '    return "".join(c.read_text() for c in t.glob("*.md"))'
+    ),
+    "guard_then_with_suffix": (
+        "    t = (ROOT / name).resolve()\n"
+        "    t.relative_to(ROOT)\n"
+        '    t.with_suffix(".bak").read_text()'
+    ),
     "guard_then_normalize_only": (
         "    t = ROOT / name\n"
         "    t.resolve().relative_to(ROOT)\n"
@@ -361,37 +439,24 @@ def main() -> int:
         return 2
     validator = Validator(sys.argv[1])
 
-    for label, body in LINEAGE.items():
-        code, _ = validator.audit(validator.server(body))
-        validator.check(
-            f"lineage/{label}",
-            code != 0,
-            f"exit {code}: clean result on caller-controlled path",
-        )
+    for group, cases, description in (
+        ("lineage", LINEAGE, "clean result on caller-controlled path"),
+        ("defeated_guard", DEFEATED_GUARDS, "containment check cannot constrain this sink"),
+        ("untracked_store", UNTRACKED_STORES, "tool input stored out of model"),
+    ):
+        for label, body in cases.items():
+            code, out = validator.audit(validator.server(body))
+            reason, detail = validator.reported_for_the_right_reason(code, out)
+            validator.check(f"{group}/{label}", reason, f"exit {code}: {description}; {detail}")
 
-    for label, body in DEFEATED_GUARDS.items():
-        code, out = validator.audit(validator.server(body))
-        validator.check(
-            f"defeated_guard/{label}",
-            code != 0,
-            f"exit {code}: containment check cannot constrain this sink\n{out[-400:]}",
-        )
-
-    for label, body in UNTRACKED_STORES.items():
-        code, _ = validator.audit(validator.server(body))
-        validator.check(
-            f"untracked_store/{label}",
-            code != 0,
-            f"exit {code}: tool input stored out of model, reported clean",
-        )
-
-    code, _ = validator.audit(
+    code, out = validator.audit(
         validator.server(
             "    global _PENDING\n    _PENDING = name\n    open(_PENDING).read()",
             preamble="_PENDING = ''",
         )
     )
-    validator.check("untracked_store/global_write", code != 0, f"exit {code}")
+    reason, detail = validator.reported_for_the_right_reason(code, out)
+    validator.check("untracked_store/global_write", reason, f"exit {code}: {detail}")
 
     for label, (body, rule) in EXECUTION.items():
         code, out = validator.audit(
@@ -406,6 +471,23 @@ def main() -> int:
             "reported Observed: none for a capability it has",
         )
 
+    for label, body in CAPABILITY_VISIBILITY.items():
+        code, out = validator.audit(validator.server(body))
+        # Either the capability is observed, or the audit says it could not follow
+        # the route. What must never happen is a clean audit reporting no capability
+        # at all, which asserts the tool cannot touch the filesystem when it can.
+        observed = "Observed:    none" not in out
+        validator.check(
+            f"capability/{label}",
+            code != 0,
+            f"exit {code}: clean audit for a tool that touches the filesystem",
+        )
+        validator.check(
+            f"capability/{label}/not_denied",
+            observed or code == 2,
+            f"reported no capability under a complete audit\n{out[-300:]}",
+        )
+
     for label, body in BENIGN.items():
         code, out = validator.audit(validator.server(body))
         validator.check(
@@ -417,9 +499,14 @@ def main() -> int:
         if canary.exists():
             canary.unlink()
         preamble = template.format(canary=canary)
-        validator.audit(validator.server("    return name", preamble=preamble))
+        _, out = validator.audit(validator.server("    return name", preamble=preamble))
         validator.check(
             f"no_execution/{label}", not canary.exists(), "target code executed"
+        )
+        validator.check(
+            f"no_execution/{label}/analyzed",
+            "MCP tool(s) discovered" in out,
+            "fixture was not analyzed, so the canary proves nothing",
         )
 
     for label, content in HOSTILE.items():
