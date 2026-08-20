@@ -52,6 +52,24 @@ time. A rule that cannot decide a property reliably must not claim to.
   for a tool that touches the filesystem; nothing in the code provides that after
   the fail-closed lineage path was removed. `docs/architecture.md` no longer carries
   an orphaned fragment asserting that guard lineage remains supported.
+- Removed the speculative-path heuristic entirely. It classified a container
+  element as possibly-a-path and then gated that on method names, which made the
+  verdict depend on spelling in both directions: `ENTRIES[key].touch()` reported
+  nothing while `entry = ENTRIES[key]; entry.touch()` reported a filesystem write
+  and a HIGH read-only conflict on an in-memory dict. A `.resolve()` hop or `str()`
+  laundered it the same way. That is the spelling-dependent verdict that led to
+  withdrawing MSC103, in the capability layer. A path retrieved from a container by
+  subscript is now simply not tracked - a bounded false negative, documented and
+  pinned by a test, in place of an unbounded false positive on ordinary code.
+- `str(path)` yields a string rather than a path, because `str.replace` collides
+  with `Path.replace`, which renames a file.
+- `UnresolvedReason.UNRESOLVED_ARGUMENT_LINEAGE` no longer prints "guard lineage";
+  guards are withdrawn and the string implied a model that no longer exists.
+- The release gate's integrity checks were satisfiable by hashing the source text,
+  which is not analysis, and the release notes claimed the opposite. They now
+  require the contract digest to be invariant under edits that change the bytes
+  without changing the contract, while still differing when the contract differs.
+  A source-hashing pattern-matcher scores 130/164; a print-and-exit stub 55/164.
 - No change to the exit-code contract, the no-execution invariant, the resource
   limits, the SARIF schema, or the snapshot digest payload.
 

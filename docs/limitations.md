@@ -80,11 +80,17 @@ modeled", not "none". A path reaching a filesystem call through a route outside 
 model - a class method, a module-level singleton, a callback the analyzer cannot
 follow - may not be reported at all. Do not read `Observed: none` as a guarantee.
 
-A receiver the analyzer only *infers* to be a path, such as an element taken out of
-a container, must be used with a pathlib-exclusive method before a capability is
-asserted, so an in-memory cache calling `.touch()` is not reported as a filesystem
-write. A container holding objects that expose `read_text`/`write_text` will still
-be reported as filesystem access; that is a known false positive.
+A path stored in a container and retrieved by subscript is **not tracked**:
+`paths["docs"].read_text()` reports no capability. Whether `D[k]` holds a path is
+not knowable statically here, and every attempt to have it both ways produced a
+verdict that changed with the spelling - treating a subscript as a path invented
+filesystem writes on in-memory caches, and gating that on method names made
+`D[k].touch()` and `entry = D[k]; entry.touch()` disagree. This is a bounded false
+negative, preferred to an unbounded false positive on ordinary code, and it is
+pinned by a test so it cannot change silently.
+
+For the same reason `str(path)` yields a string, not a path: `str.replace` and
+`Path.replace` share a name, and the latter renames a file.
 
 `MSC001` matches deterministic wording families, and those families differ in
 precision. Unambiguous directive families are Critical. The `credential-handling

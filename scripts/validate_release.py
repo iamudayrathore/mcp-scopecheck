@@ -98,10 +98,12 @@ class Validator:
         scored a clean sweep - while the build under test carried a live false
         negative on `Path(name).unlink()`.
 
-        So require artefacts a pattern-matcher cannot fabricate for an arbitrary
-        fixture: the tool discovered by name from its decorator, the parameter list
-        recovered from the signature, and a snapshot digest over the extracted
-        contract.
+        So require artefacts that indicate the fixture was read: the tool discovered
+        by name, the parameter list recovered from the signature, and a snapshot
+        digest. None of these is individually hard to fake; the integrity checks at
+        the end of this file are what make faking them collectively difficult, and
+        this gate should be read as evidence that nothing regressed in the shapes
+        enumerated here - not as evidence of correctness.
         """
 
         for required, detail in (
@@ -146,9 +148,6 @@ CAPABILITY_VISIBILITY = {
     "open_keyword_unpacked": '    kw = {"file": name}\n    open(**kw).read()',
     "path_through_local_helper": (
         "    _pick(Path(name)).write_text('x')"
-    ),
-    "path_through_container": (
-        '    d = {"a": Path(name)}\n    d["a"].read_text()'
     ),
     "local_function_as_callback": (
         "    import functools\n"
@@ -337,6 +336,20 @@ def main() -> int:
         analysed, detail = validator.proves_real_analysis(out)
         validator.check(f"execution/{label}/analyzed", analysed, detail)
 
+    # Documented blind spot, pinned so a change is deliberate rather than silent:
+    # a path stored in a container and retrieved by subscript is not tracked. See
+    # docs/limitations.md. Treating a subscript as a path invented filesystem
+    # capabilities on in-memory objects and made the verdict depend on spelling.
+    code, out = validator.audit(
+        validator.server('    d = {"a": Path(name)}\n    d["a"].read_text()')
+    )
+    validator.check(
+        "blind_spot/container_element_is_not_tracked",
+        code == 0 and "filesystem" not in out,
+        f"container-element tracking changed (exit {code}); update docs/limitations.md "
+        "and this case together, or it is an undocumented behaviour change",
+    )
+
     for label, body in BENIGN.items():
         code, out = validator.audit(validator.server(body))
         validator.check(
@@ -421,40 +434,43 @@ def main() -> int:
     except ValueError as error:
         validator.check("sarif/failure_is_json", False, str(error))
 
-    # A build that does not analyze can print any fixed line, including a plausible
-    # snapshot header. It cannot produce digests that track the contract: the same
-    # tool must hash identically across runs, and a different contract must hash
-    # differently. This is the one assertion a pattern-matcher cannot satisfy for
-    # arbitrary input, so it anchors every other check in this file.
-    digests = []
-    for body in (
-        "    Path(name).read_text()",
-        "    Path(name).write_text('x')\n    import subprocess\n    subprocess.run(name)",
-    ):
+    # Anchor for every other check in this file. A build that does not analyze can
+    # print any fixed line, and can hash the source text to produce something that
+    # looks like a contract digest - an earlier version of these checks was
+    # satisfied by exactly that. What a text hasher cannot do is be *invariant*
+    # under edits that change the bytes without changing the contract, while still
+    # tracking edits that do change it. Both directions are required below.
+    def digest_of(body: str) -> str:
         _, out = validator.audit(validator.server(body))
         line = next(
             (item for item in out.splitlines() if "Snapshot:" in item and "sha256:" in item),
             "",
         )
-        digests.append(line.split("sha256:", 1)[-1].strip())
+        return line.split("sha256:", 1)[-1].strip()
+
+    baseline = digest_of("    return Path(name).read_text()")
+    reformatted = digest_of("    return Path( name ).read_text( )")
+    different = digest_of("    return Path(name).write_text('x')")
+
     validator.check(
         "integrity/digest_is_wellformed",
-        all(len(digest) == 64 and set(digest) <= set("0123456789abcdef") for digest in digests),
-        f"snapshot digests are not sha256 hex: {digests}",
+        len(baseline) == 64 and set(baseline) <= set("0123456789abcdef"),
+        f"snapshot digest is not sha256 hex: {baseline!r}",
     )
     validator.check(
-        "integrity/digest_tracks_contract",
-        len(set(digests)) == 2,
-        "two different tools produced the same contract digest; "
-        "the fixture was not analyzed",
+        "integrity/digest_survives_reformatting",
+        baseline == reformatted and baseline != "",
+        "changing whitespace changed the contract digest; the digest is over source "
+        "text, not over an extracted contract, so nothing here was analyzed",
     )
-    repeat_first = validator.audit(validator.server("    Path(name).read_text()"))[1]
-    repeated = next(
-        (i for i in repeat_first.splitlines() if "Snapshot:" in i), ""
-    ).split("sha256:", 1)[-1].strip()
+    validator.check(
+        "integrity/digest_tracks_the_contract",
+        baseline != different,
+        "two different contracts produced the same digest",
+    )
     validator.check(
         "integrity/digest_is_deterministic",
-        repeated == digests[0],
+        digest_of("    return Path(name).read_text()") == baseline,
         "the same contract produced two different digests",
     )
 

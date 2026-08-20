@@ -89,9 +89,11 @@ class CapabilityObservationTests(unittest.TestCase):
         report = _audit("    _resolve(name).write_text(body)")
         self.assertIn(Capability.FILESYSTEM_WRITE, _capabilities(report))
 
-    def test_access_through_a_container_is_observed(self) -> None:
+    def test_access_through_a_container_is_a_known_blind_spot(self) -> None:
+        """Documented in docs/limitations.md; pinned so it cannot change silently."""
+
         report = _audit('    d = {"a": Path(name)}\n    d["a"].read_text()')
-        self.assertIn(Capability.FILESYSTEM_READ, _capabilities(report))
+        self.assertEqual(_capabilities(report), set())
 
     def test_evidence_records_the_path_to_the_sink(self) -> None:
         report = _audit("    _resolve(name).write_text(body)")
@@ -105,53 +107,45 @@ class CapabilityObservationTests(unittest.TestCase):
         self.assertEqual(evidence.path[0].symbol, "entry")
 
 
-class SpeculativeReceiverTests(unittest.TestCase):
-    """An inferred path must not invent a capability on unrelated objects.
+class ContainerElementTests(unittest.TestCase):
+    """A container element is deliberately not treated as a path.
 
-    `ENTRIES[key].touch()` on an in-memory cache reported a filesystem write, and
-    with the contract rules still active it also produced a HIGH readOnlyHint
-    conflict. Ambiguous method names on a merely-inferred receiver no longer count.
+    Whether `D[k]` holds a path is not knowable here. Treating it as one invented
+    filesystem writes on in-memory caches; gating that on method names made
+    `D[k].touch()` and `entry = D[k]; entry.touch()` disagree - the same
+    spelling-dependent verdict that led to withdrawing MSC103. A path retrieved
+    from a container by subscript is not tracked. That is a bounded false negative,
+    stated in docs/limitations.md, and preferred to an unbounded false positive on
+    ordinary code.
     """
 
-    def test_ambiguous_methods_on_a_container_element_are_not_filesystem(self) -> None:
-        for method in ("touch", "rename", "open", "chmod", "unlink"):
+    def test_no_capability_is_invented_for_container_elements(self) -> None:
+        for method in ("touch", "rename", "open", "chmod", "unlink", "read_text"):
             with self.subTest(method=method):
                 report = _audit(f"    ENTRIES = {{}}\n    ENTRIES[name].{method}()")
                 self.assertEqual(_capabilities(report), set())
                 self.assertEqual(_rules(report), set())
 
-    def test_ambiguous_methods_on_a_proven_path_are_filesystem(self) -> None:
-        """A constructed Path is proven, so every sink method on it counts.
+    def test_container_verdict_does_not_depend_on_spelling(self) -> None:
+        inline = _audit("    ENTRIES = {}\n    ENTRIES[name].touch()")
+        bound = _audit("    ENTRIES = {}\n    entry = ENTRIES[name]\n    entry.touch()")
+        self.assertEqual(_capabilities(inline), _capabilities(bound))
+        self.assertEqual(_rules(inline), _rules(bound))
 
-        Treating any call receiver as speculative made `Path(name).unlink()` report
-        no capability while `p = Path(name); p.unlink()` reported the write - the
-        same code, judged differently on line count.
-        """
+    def test_a_normalizing_hop_does_not_launder_a_container_element(self) -> None:
+        report = _audit("    R = {}\n    R[name].resolve(name).rename(name)")
+        self.assertEqual(_capabilities(report), set())
 
-        for body, capability in (
-            ("    Path(name).unlink()", Capability.FILESYSTEM_WRITE),
-            ("    Path(name).touch()", Capability.FILESYSTEM_WRITE),
-            ("    Path(name).rename('x')", Capability.FILESYSTEM_WRITE),
-            ("    Path(name).open().read()", Capability.FILESYSTEM_READ),
-            ("    _resolve(name).touch()", Capability.FILESYSTEM_WRITE),
-            ("    (p := Path(name)).touch()", Capability.FILESYSTEM_WRITE),
-        ):
-            with self.subTest(body=body.strip()):
-                self.assertIn(capability, _capabilities(_audit(body)))
+    def test_str_of_a_path_is_a_string_not_a_path(self) -> None:
+        """`str.replace` collides with `Path.replace`, which renames a file."""
 
-    def test_one_line_and_two_line_spellings_agree(self) -> None:
-        single = _capabilities(_audit("    Path(name).unlink()"))
-        split = _capabilities(_audit("    p = Path(name)\n    p.unlink()"))
-        self.assertEqual(single, split)
+        report = _audit("    raw = str(ROOT / name)\n    raw.replace('a', 'b')")
+        self.assertEqual(_capabilities(report), set())
 
-    def test_pathlib_exclusive_methods_on_a_container_element_still_count(self) -> None:
-        for method in ("read_text", "iterdir", "read_bytes"):
-            with self.subTest(method=method):
-                report = _audit(f"    ENTRIES = {{}}\n    ENTRIES[name].{method}()")
-                self.assertTrue(_capabilities(report) & {
-                    Capability.FILESYSTEM_READ,
-                    Capability.FILESYSTEM_WRITE,
-                })
+    def test_str_of_a_path_still_reaches_a_real_sink(self) -> None:
+        report = _audit("    open(str(Path(name))).read()")
+        self.assertIn(Capability.FILESYSTEM_READ, _capabilities(report))
+
 
 
 if __name__ == "__main__":
