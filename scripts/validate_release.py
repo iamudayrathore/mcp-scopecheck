@@ -41,6 +41,8 @@ PREAMBLE = (
     "ROOT = Path('/srv/docs')\n"
     "def _pick(value):\n"
     "    return value\n"
+    "def _resolve(value):\n"
+    "    return ROOT / value\n"
 )
 
 
@@ -116,171 +118,20 @@ class Validator:
         return directory
 
 
-# Path lineage. Every form reaches a filesystem call with caller-controlled input,
-# so none may produce a clean result. Some are reported as MSC103 and some fail
-# closed to partial; either is correct, silence is not.
-LINEAGE = {
-    "percent": '    t = "%s/%s" % ("/srv", name)\n    open(t).read()',
-    "format": '    t = "{}/{}".format("/srv", name)\n    open(t).read()',
-    "str_join": '    t = "/".join(["/srv", name])\n    open(t).read()',
-    "os_sep_join": '    t = os.sep.join(["/srv", name])\n    open(t).read()',
-    "posixpath_join": '    t = posixpath.join("/srv", name)\n    open(t).read()',
-    "os_path_join": '    t = os.path.join("/srv", name)\n    open(t).read()',
-    "strip": '    t = name.strip("/")\n    open(t).read()',
-    "lstrip": '    t = name.lstrip("./")\n    open(t).read()',
-    "replace_dotdot": '    t = name.replace("..", "")\n    open(t).read()',
-    "removeprefix": '    t = name.removeprefix("/")\n    open(t).read()',
-    "encode_decode": "    t = name.encode().decode()\n    open(t).read()",
-    "ternary": '    t = name if name else "d"\n    open(t).read()',
-    "walrus": "    t = (x := name)\n    open(t).read()",
-    "dict_index": '    t = {"k": name}["k"]\n    open(t).read()',
-    "list_index": "    t = [name][0]\n    open(t).read()",
-    "slice": "    t = name[0:]\n    open(t).read()",
-    "unquote": "    t = urllib.parse.unquote(name)\n    open(t).read()",
-    "tuple_unpack": "    t, _ = name, 1\n    open(t).read()",
-    "aug_assign": '    t = "/srv"\n    t += name\n    open(t).read()',
-    "for_binding": "    for t in [name]:\n        pass\n    open(t).read()",
-    "try_binding": (
-        '    try:\n        t = name\n    except Exception:\n        t = "d"\n'
-        "    open(t).read()"
-    ),
-    "list_comprehension": "    t = [v for v in [name]][0]\n    open(t).read()",
-    "next_iter": "    t = next(iter([name]))\n    open(t).read()",
-    "helper_return": "    t = _pick(name)\n    open(t).read()",
-    "external_call": "    import somepkg\n    t = somepkg.clean(name)\n    open(t).read()",
-    "fstring": '    t = f"/srv/{name}"\n    open(t).read()',
-    "concat": '    t = "/srv/" + name\n    open(t).read()',
-    "write_mode": '    open(name, "w").write("x")',
-    "file_keyword": "    open(file=name).read()",
-    "subscript_store": '    r = {}\n    r["t"] = name\n    open(r["t"]).read()',
-    "attribute_store": (
-        "    class Box:\n        t = None\n    Box.t = name\n    open(Box.t).read()"
-    ),
-    "container_mutation": "    q = []\n    q.append(name)\n    open(q[0]).read()",
-    "match_capture": (
-        "    match name:\n        case str() as t:\n            open(t).read()"
-    ),
-    "generator_expression": '    return "".join(open(name).read() for _ in range(1))',
-}
-
-# Defeated guards. Each of these performs a containment check that cannot actually
-# constrain the sink - the exception is swallowed, or the guarded value is not the
-# one that reaches the sink. None may produce a clean result. Every case here was a
-# false clean in a release that shipped its gate green.
-DEFEATED_GUARDS = {
-    "try_except_pass": (
-        "    try:\n"
-        "        t = ROOT / name\n"
-        "        t.relative_to(ROOT)\n"
-        "    except ValueError:\n"
-        "        pass\n"
-        "    t.read_text()"
-    ),
-    "try_except_bare": (
-        "    try:\n"
-        "        t = ROOT / name\n"
-        "        t.relative_to(ROOT)\n"
-        "    except Exception:\n"
-        "        _ = 1\n"
-        "    t.read_text()"
-    ),
-    "try_except_finally": (
-        "    try:\n"
-        "        t = ROOT / name\n"
-        "        t.resolve().relative_to(ROOT)\n"
-        "    except ValueError:\n"
-        "        _ = 1\n"
-        "    finally:\n"
-        "        _ = 2\n"
-        "    t.read_text()"
-    ),
-    "contextlib_suppress": (
-        "    import contextlib\n"
-        "    t = ROOT / name\n"
-        "    with contextlib.suppress(ValueError):\n"
-        "        t.relative_to(ROOT)\n"
-        "    t.read_text()"
-    ),
-    "guard_then_escape_upward": (
-        "    t = ROOT / name\n"
-        "    t.resolve().relative_to(ROOT)\n"
-        '    (t / ".." / ".." / "etc" / "passwd").read_text()'
-    ),
-    "guard_then_expanduser": (
-        "    t = ROOT / name\n"
-        "    t.resolve().relative_to(ROOT)\n"
-        "    t.expanduser().read_text()"
-    ),
-    "guard_then_join": (
-        "    t = ROOT / name\n"
-        "    t.resolve().relative_to(ROOT)\n"
-        '    t.joinpath("..", "..", "etc").read_text()'
-    ),
-    "guard_other_value": (
-        "    a = ROOT / name\n"
-        "    b = ROOT / (name + '.bak')\n"
-        "    a.resolve().relative_to(ROOT)\n"
-        "    b.read_text()"
-    ),
-    "while_body_may_not_run": (
-        "    t = (ROOT / name).resolve()\n"
-        "    while t != t.resolve():\n"
-        "        t.relative_to(ROOT)\n"
-        "    t.read_text()"
-    ),
-    "finally_return_swallows": (
-        "    t = (ROOT / name).resolve()\n"
-        "    try:\n"
-        "        t.relative_to(ROOT)\n"
-        "    finally:\n"
-        "        return t.read_text()"
-    ),
-    "assert_is_stripped_under_O": (
-        "    t = (ROOT / name).resolve()\n"
-        "    assert t.relative_to(ROOT)\n"
-        "    t.read_text()"
-    ),
-    "write_after_defeated_guard": (
-        "    try:\n"
-        "        t = ROOT / name\n"
-        "        t.relative_to(ROOT)\n"
-        "    except ValueError:\n"
-        "        pass\n"
-        '    t.write_text("x")'
-    ),
-}
-
-# Stores that put tool input somewhere the analyzer does not track. Whatever the
-# spelling, none may produce a clean result: `d[k] = p` and `d.__setitem__(k, p)`
-# are the same operation and must be reported the same way.
-UNTRACKED_STORES = {
-    "subscript": '    r = {}\n    r["t"] = name\n    open(r["t"]).read()',
-    "dunder_setitem": '    r = {}\n    r.__setitem__("t", name)\n    open(r["t"]).read()',
-    "operator_setitem": (
-        "    import operator\n    r = {}\n"
-        '    operator.setitem(r, "t", name)\n    open(r["t"]).read()'
-    ),
-    "heapq_heappush": (
-        "    import heapq\n    q = []\n"
-        "    heapq.heappush(q, name)\n    open(q[0]).read()"
-    ),
-    "deque_appendleft": (
-        "    import collections\n    q = collections.deque()\n"
-        "    q.appendleft(name)\n    open(q[0]).read()"
-    ),
-    "attribute": (
-        "    class Box:\n        t = None\n    Box.t = name\n    open(Box.t).read()"
-    ),
-    "bound_dunder_setitem": (
-        '    d = {}\n    x = d.__setitem__("t", ROOT / name)\n    open(d["t"]).read()'
-    ),
-}
-
 # Capability detection. A path that reaches a filesystem call must be observed even
 # when it arrives by a route the analyzer does not model. Reporting `Observed: none`
 # for a tool that writes an arbitrary caller-supplied path is an affirmative denial,
 # which is worse than reporting nothing.
 CAPABILITY_VISIBILITY = {
+    "path_built_inside_helper": "    _resolve(name).write_text('x')",
+    "nested_helper": (
+        "    def _inner(value):\n        return Path(value)\n"
+        "    _inner(name).write_text('x')"
+    ),
+    "direct_read": "    Path(name).read_text()",
+    "direct_write": "    Path(name).write_text('x')",
+    "open_builtin": "    open(name).read()",
+    "open_keyword_unpacked": '    kw = {"file": name}\n    open(**kw).read()',
     "path_through_local_helper": (
         "    _pick(Path(name)).write_text('x')"
     ),
@@ -362,6 +213,10 @@ BENIGN = {
     ),
     "data_argument": '    (ROOT / "report.txt").write_text(name.strip())',
     "no_filesystem": "    return name.upper()",
+    "in_memory_cache_touch": "    ENTRIES = {}\n    ENTRIES[name].touch()\n    return 'ok'",
+    "in_memory_cache_rename": "    ENTRIES = {}\n    ENTRIES[name].rename('x')\n    return 'ok'",
+    "logging_a_parameter": "    import logging\n    logging.info(name)\n    return 'ok'",
+    "printing_a_parameter": "    print(name)\n    return 'ok'",
     "separator_split": "    return '|'.join(name.split('/'))",
     "pure_dict_store": (
         "    envelope = {}\n"
@@ -439,24 +294,24 @@ def main() -> int:
         return 2
     validator = Validator(sys.argv[1])
 
-    for group, cases, description in (
-        ("lineage", LINEAGE, "clean result on caller-controlled path"),
-        ("defeated_guard", DEFEATED_GUARDS, "containment check cannot constrain this sink"),
-        ("untracked_store", UNTRACKED_STORES, "tool input stored out of model"),
-    ):
-        for label, body in cases.items():
-            code, out = validator.audit(validator.server(body))
-            reason, detail = validator.reported_for_the_right_reason(code, out)
-            validator.check(f"{group}/{label}", reason, f"exit {code}: {description}; {detail}")
-
-    code, out = validator.audit(
-        validator.server(
-            "    global _PENDING\n    _PENDING = name\n    open(_PENDING).read()",
-            preamble="_PENDING = ''",
+    for label, body in CAPABILITY_VISIBILITY.items():
+        code, out = validator.audit(validator.server(body))
+        # The contract rules for filesystem containment are withdrawn, so the
+        # requirement is no longer a finding - it is that the capability is reported
+        # and never denied. `Observed: none` on a tool that touches the filesystem is
+        # the failure this group exists to prevent.
+        observed = "filesystem_read" in out or "filesystem_write" in out
+        validator.check(
+            f"capability/{label}",
+            observed or code == 2,
+            f"capability denied under a complete audit (exit {code})\n{out[-300:]}",
         )
-    )
-    reason, detail = validator.reported_for_the_right_reason(code, out)
-    validator.check("untracked_store/global_write", reason, f"exit {code}: {detail}")
+        validator.check(
+            f"capability/{label}/analyzed",
+            "1 MCP tool(s) discovered" in out,
+            "fixture was not analyzed",
+        )
+
 
     for label, (body, rule) in EXECUTION.items():
         code, out = validator.audit(
@@ -469,23 +324,6 @@ def main() -> int:
             f"execution/{label}/observed",
             "Observed:    none" not in out,
             "reported Observed: none for a capability it has",
-        )
-
-    for label, body in CAPABILITY_VISIBILITY.items():
-        code, out = validator.audit(validator.server(body))
-        # Either the capability is observed, or the audit says it could not follow
-        # the route. What must never happen is a clean audit reporting no capability
-        # at all, which asserts the tool cannot touch the filesystem when it can.
-        observed = "Observed:    none" not in out
-        validator.check(
-            f"capability/{label}",
-            code != 0,
-            f"exit {code}: clean audit for a tool that touches the filesystem",
-        )
-        validator.check(
-            f"capability/{label}/not_denied",
-            observed or code == 2,
-            f"reported no capability under a complete audit\n{out[-300:]}",
         )
 
     for label, body in BENIGN.items():
@@ -537,8 +375,11 @@ def main() -> int:
             "raw control sequence reached the output stream",
         )
 
+    # MSC102 is the stable HIGH-severity rule now that the filesystem contract
+    # rules are withdrawn; the threshold behaviour under test is rule-independent.
     findings_target = validator.server(
-        '    t = os.path.join("/srv", name)\n    open(t).read()'
+        "    import httpx\n"
+        '    return httpx.get("https://api.example.com/" + name)'
     )
     for label, arguments, expected in (
         ("default_threshold", (), 1),

@@ -378,7 +378,7 @@ class CrossModuleTests(unittest.TestCase):
         self.assertTrue(
             {
                 ("claimed", "MSC101"),
-                ("claimed", "MSC103"),
+                ("claimed", "MSC101"),
                 ("claimed", "MSC106"),
                 ("claimed", "MSC108"),
                 ("code_tool", "MSC101"),
@@ -387,84 +387,6 @@ class CrossModuleTests(unittest.TestCase):
             <= rules
         )
         self.assertNotIn(("claimed", "MSC102"), rules)
-
-    def test_msc103_cross_module_guards_and_unresolved_lineage(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            _sources(
-                root,
-                {
-                    "pkg/__init__.py": "",
-                    "pkg/guarded.py": "\n".join(
-                        [
-                            "from pathlib import Path",
-                            "ROOT = Path('/srv/data')",
-                            "def read_guarded(path):",
-                            "    candidate = (ROOT / path).resolve()",
-                            "    candidate.relative_to(ROOT)",
-                            "    return candidate.read_text()",
-                        ]
-                    ),
-                    "pkg/manager.py": (
-                        "class Manager:\n"
-                        "    def read(self, path):\n"
-                        "        return path\n"
-                    ),
-                    "pkg/server.py": "\n".join(
-                        [
-                            "from pathlib import Path",
-                            "from .guarded import read_guarded",
-                            "from .manager import Manager",
-                            "ROOT = Path('/srv/data')",
-                            "@mcp.tool()",
-                            "def safe(path: str):",
-                            "    return read_guarded(path)",
-                            "@mcp.tool()",
-                            "def unknown(path: str, manager: Manager):",
-                            "    candidate = (ROOT / path).resolve()",
-                            "    candidate.relative_to(ROOT)",
-                            "    return manager.read(candidate)",
-                        ]
-                    ),
-                },
-            )
-            report = audit(root)
-
-        self.assertNotIn(
-            "safe",
-            {finding.tool_name for finding in report.findings if finding.rule_id == "MSC103"},
-        )
-        self.assertNotIn(
-            "unknown",
-            {finding.tool_name for finding in report.findings if finding.rule_id == "MSC103"},
-        )
-        self.assertTrue(
-            any(item.code == "MSC103-GUARD-UNKNOWN" for item in report.completeness.notifications)
-        )
-        self.assertEqual(report.completeness.status, AnalysisStatus.PARTIAL)
-
-    def test_msc103_is_suppressed_when_a_wrapper_may_own_the_guard(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            _sources(
-                root,
-                {
-                    "server.py": "\n".join(
-                        [
-                            "@validation_wrapper",
-                            "@mcp.tool()",
-                            "def entry(path: str):",
-                            "    return open(path).read()",
-                        ]
-                    )
-                },
-            )
-            report = audit(root)
-
-        self.assertNotIn("MSC103", {finding.rule_id for finding in report.findings})
-        self.assertTrue(
-            any(item.code == "MSC103-GUARD-UNKNOWN" for item in report.completeness.notifications)
-        )
 
     def test_msc105_does_not_cross_function_or_module_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

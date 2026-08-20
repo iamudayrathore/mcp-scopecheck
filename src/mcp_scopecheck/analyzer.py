@@ -36,6 +36,22 @@ PATH_WRITE_METHODS = {
     "write_bytes",
     "write_text",
 }
+# Method names that exist on pathlib.Path and essentially nowhere else. Used to
+# decide whether a receiver the analyzer merely infers to be a path may be treated
+# as one; `open`, `touch`, `rename`, `chmod` and `unlink` are deliberately absent
+# because they are common on unrelated objects.
+PATHLIB_EXCLUSIVE_METHODS = frozenset(
+    {
+        "iterdir",
+        "read_bytes",
+        "read_text",
+        "rglob",
+        "with_suffix",
+        "write_bytes",
+        "write_text",
+    }
+)
+
 PATH_RETURNING_METHODS = {
     "absolute",
     "expanduser",
@@ -1223,9 +1239,6 @@ def _assigned_names(node: ast.AST) -> set[str]:
     return set()
 
 
-def _is_path_parameter_name(name: str) -> bool:
-    normalized = name.lstrip("*").lower()
-    return normalized in PATH_PARAMETER_NAMES or normalized.endswith(PATH_PARAMETER_SUFFIXES)
 
 
 @dataclass
@@ -1300,6 +1313,32 @@ def _parameter_has_local_class_annotation(
     return False
 
 
+def _looks_like_path_expression(node: ast.AST, record: FunctionRecord) -> bool:
+    """Structural test for an expression that yields a filesystem path.
+
+    Evaluated in the callee's own scope, so a module-level root such as
+    `ROOT = Path("/srv/docs")` counts: `return ROOT / value` is the ordinary way a
+    path helper is written.
+    """
+
+    imports = record.imports
+    if isinstance(node, ast.Name):
+        return node.id in record.path_bindings
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        return _looks_like_path_expression(node.left, record)
+    if isinstance(node, ast.Attribute) and node.attr == "parent":
+        return _looks_like_path_expression(node.value, record)
+    if not isinstance(node, ast.Call):
+        return False
+    if _qualified_name(node.func, imports) in {"pathlib.Path", "os.fspath"}:
+        return True
+    return (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr in PATH_RETURNING_METHODS
+        and _looks_like_path_expression(node.func.value, record)
+    )
+
+
 class _ExecutionVisitor(ast.NodeVisitor):
     """Follow executable lexical scopes without importing target code."""
 
@@ -1371,9 +1410,11 @@ class _ExecutionVisitor(ast.NodeVisitor):
         if isinstance(value, ast.Attribute) and value.attr == "parent":
             return self._is_path_value(value.value, resolved_imports)
         if isinstance(value, ast.Subscript):
-            # `paths["docs"].read_text()`. The method names this feeds are
-            # pathlib-specific, so an element taken out of a container and used as a
-            # path is one. Treating it as unknown erased the capability entirely.
+            # `paths["docs"].read_text()`. Only pathlib-exclusive method names
+            # qualify, checked by the caller: `touch`, `rename`, `open` and `chmod`
+            # are ordinary method names on caches, ORM rows and connection pools, and
+            # treating any subscript as a path made `ENTRIES[key].touch()` report a
+            # filesystem write the tool does not perform.
             return True
         if not isinstance(value, ast.Call):
             return False
@@ -1384,6 +1425,8 @@ class _ExecutionVisitor(ast.NodeVisitor):
             and value.func.attr in PATH_RETURNING_METHODS
             and self._is_path_value(value.func.value, resolved_imports)
         ):
+            return True
+        if self._returns_path(value):
             return True
         # A call that receives a path and returns something unmodeled may well
         # return that path: `_pick(Path(name)).write_text(body)` is an arbitrary
@@ -1411,6 +1454,13 @@ class _ExecutionVisitor(ast.NodeVisitor):
         if not self._is_path_value(call.func.value, imports):
             return None
         method = call.func.attr
+        if self._is_speculative_path(call.func.value) and method not in PATHLIB_EXCLUSIVE_METHODS:
+            # The receiver is only *possibly* a path - an element out of a container,
+            # or the result of a call the analyzer cannot type. Ambiguous method
+            # names (`open`, `touch`, `rename`, `chmod`) are ordinary on caches, ORM
+            # rows and connection pools, so require a name that belongs to pathlib
+            # alone before asserting a filesystem capability the tool may not have.
+            return None
         symbol = _display_name(call.func, imports)
         if method in PATH_READ_METHODS:
             return symbol, Capability.FILESYSTEM_READ
@@ -1419,6 +1469,46 @@ class _ExecutionVisitor(ast.NodeVisitor):
         if method == "open":
             return symbol, _mode_capability(call, 0)
         return None
+
+    def _returns_path(self, call: ast.Call) -> bool:
+        """Whether a resolvable project-local callee returns a path.
+
+        `def _resolve(name): return ROOT / name` then `_resolve(name).write_text(...)`
+        is the ordinary way to write a path helper, and it constructs the path inside
+        the callee, so there is no path argument to notice. Before 0.2.5 the sink was
+        never registered and the tool reported `Observed: none` under a `complete`
+        audit - an arbitrary caller-controlled write, denied outright.
+
+        One level deep, over calls the analyzer already resolved, which is the
+        same-file boundary the product already claims.
+        """
+
+        # Resolve the callee directly rather than reading the edge table: the
+        # receiver call has not been traversed yet when its parent is classified.
+        callee = self._direct_call_resolution(call).target
+        if callee is None or callee is self.record:
+            return False
+        for node in ast.walk(callee.node):
+            if not isinstance(node, (ast.Return, ast.Expr)):
+                continue
+            returned = node.value
+            if returned is None:
+                continue
+            if isinstance(node, ast.Expr) and not isinstance(returned, ast.Yield):
+                continue
+            if isinstance(returned, ast.Yield):
+                returned = returned.value
+            if returned is None:
+                continue
+            if _looks_like_path_expression(returned, callee):
+                return True
+        return False
+
+    @staticmethod
+    def _is_speculative_path(value: ast.AST) -> bool:
+        """Whether the receiver is only inferred to be a path, not proven one."""
+
+        return isinstance(value, (ast.Subscript, ast.Call))
 
     def _path_iterator(self, value: ast.AST) -> bool:
         return (
@@ -1859,45 +1949,12 @@ def analyze_capabilities(
     return observed[:MAX_CAPABILITY_PATHS_PER_TOOL], budget_exceeded
 
 
-@dataclass(frozen=True)
-class _PathValue:
-    sources: frozenset[str] = frozenset()
-    tokens: frozenset[int] = frozenset()
-    # False when the value carries tool-parameter data through an expression form
-    # the analyzer does not model. Such a value still taints, so the sink is not
-    # lost, but MSC103 must not assert an unguarded finding on lineage it cannot
-    # explain; the sink is reported as incomplete instead.
-    proven: bool = True
 
 
-@dataclass
-class _PathFlowState:
-    bindings: dict[str, _PathValue]
-    guarded: set[int]
 
 
-@dataclass(frozen=True)
-class _PathSinkFlow:
-    sources: frozenset[str]
-    evidence: Evidence
-    proven: bool = True
 
 
-@dataclass
-class _PathScopeResult:
-    sinks: list[_PathSinkFlow] = field(default_factory=list)
-    expanded_sources: set[str] = field(default_factory=set)
-    # Tool input stored where the analyzer cannot follow it. Never silently
-    # discarded: each entry degrades the audit to partial.
-    escapes: list[Evidence] = field(default_factory=list)
-
-    @property
-    def proven_sinks(self) -> list[_PathSinkFlow]:
-        return [sink for sink in self.sinks if sink.proven]
-
-    @property
-    def unproven_sinks(self) -> list[_PathSinkFlow]:
-        return [sink for sink in self.sinks if not sink.proven]
 
 
 # Methods that return a string derived from their receiver. A path that survives
@@ -2008,1011 +2065,16 @@ TWO_PATH_CALLS = {
 }
 
 
-class _PathFlowVisitor(ast.NodeVisitor):
-    """Correlate path-like tool inputs, guards, and filesystem sinks."""
 
-    def __init__(
-        self,
-        record: FunctionRecord,
-        project: ParsedProject,
-        bindings: dict[str, _PathValue],
-        guarded: set[int],
-        result: _PathScopeResult,
-        active: set[int],
-    ) -> None:
-        self.record = record
-        self.project = project
-        self.execution = _execution(record, project)
-        self.bindings = dict(bindings)
-        self.guarded = set(guarded)
-        self.result = result
-        self.active = active
-        # Names this function rebinds at module or enclosing scope. Assignments to
-        # them leave the function-local model the analyzer tracks.
-        self.escaping_scopes: set[str] = set()
-        # Calls whose return value is discarded; see `_record_mutation`.
-        self.discarded_calls: set[int] = set()
 
-    def visit_Global(self, node: ast.Global) -> None:
-        self.escaping_scopes.update(node.names)
 
-    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
-        self.escaping_scopes.update(node.names)
 
-    def scan(self) -> set[int]:
-        identity = id(self.record.node)
-        if identity in self.active:
-            return set(self.guarded)
-        self.active.add(identity)
-        try:
-            for statement in self.record.node.body:
-                self.visit(statement)
-        finally:
-            self.active.remove(identity)
-        return set(self.guarded)
 
-    def _state(self) -> _PathFlowState:
-        return _PathFlowState(dict(self.bindings), set(self.guarded))
 
-    def _restore(self, state: _PathFlowState) -> None:
-        self.bindings = dict(state.bindings)
-        self.guarded = set(state.guarded)
 
-    def _merge_states(self, first: _PathFlowState, second: _PathFlowState) -> None:
-        """Join two control-flow paths.
 
-        Taint unions and guards intersect - the conservative direction for each.
-        Intersecting the bindings, as releases before 0.2.2 did, dropped a value
-        that was tainted on only one path, so `try: p = name / except: p = DEFAULT`
-        or a `for` loop that may not execute silently untainted the value and the
-        sink went unreported. A value tainted on any reachable path is tainted at
-        the join; a guard holds only if every joined path established it.
-        """
 
-        merged: dict[str, _PathValue] = {}
-        guarded = first.guarded & second.guarded
-        for name in set(first.bindings) | set(second.bindings):
-            left = first.bindings.get(name, _PathValue())
-            right = second.bindings.get(name, _PathValue())
-            if left == right:
-                if left.sources:
-                    merged[name] = left
-                continue
-            # A branch that rebinds the name to an untainted value contributes no
-            # tainted lineage, so it must not dilute the other branch's guard. The
-            # canonical containment idiom depends on this:
-            #
-            #     try:
-            #         target = ROOT / name
-            #         target.resolve().relative_to(ROOT)   # guard, or raises
-            #     except ValueError:
-            #         target = ROOT / "index.md"           # untainted fallback
-            #
-            # Intersecting guards across both branches, as 0.2.2 did, discarded the
-            # guard the try branch established and reported correct code as
-            # unconstrained. Only branches that actually carry taint are joined.
-            tainted = [value for value in (left, right) if value.sources]
-            if not tainted:
-                continue
-            if len(tainted) == 1:
-                merged[name] = tainted[0]
-                if tainted[0].tokens and tainted[0].tokens <= (
-                    first.guarded if tainted[0] is left else second.guarded
-                ):
-                    guarded |= tainted[0].tokens
-                continue
-            merged[name] = _PathValue(
-                left.sources | right.sources,
-                left.tokens | right.tokens,
-                proven=left.proven and right.proven,
-            )
-        self.bindings = merged
-        self.guarded = guarded
 
-    def _derived(
-        self,
-        node: ast.AST,
-        values: Iterable[_PathValue],
-        *,
-        preserves_containment: bool = False,
-    ) -> _PathValue:
-        """Derive a new value, carrying containment only when it provably survives.
-
-        The default is False - fail closed. A derivation that adds a path component
-        or changes the root produces an unguarded value even when every input was
-        guarded, because containment of `t` says nothing about `t / x`.
-        """
-
-        items = list(values)
-        sources = frozenset(source for value in items for source in value.sources)
-        if not sources:
-            return _PathValue()
-        token = id(node)
-        original_tokens = {item for value in items for item in value.tokens}
-        if preserves_containment and original_tokens and original_tokens <= self.guarded:
-            self.guarded.add(token)
-        return _PathValue(
-            sources,
-            frozenset({token}),
-            proven=all(value.proven for value in items),
-        )
-
-    def _tracked_sources(self, node: ast.AST) -> frozenset[str]:
-        """Sources reachable from any tracked name appearing under `node`."""
-
-        if not self.bindings:
-            return frozenset()
-        sources: set[str] = set()
-        for child in ast.walk(node):
-            if isinstance(child, ast.Name):
-                sources.update(self.bindings.get(child.id, _PathValue()).sources)
-        return frozenset(sources)
-
-    def _unmodeled(self, node: ast.AST) -> _PathValue:
-        """Fail closed on an expression form the analyzer does not model.
-
-        Returning an empty value here would silently drop the taint and let a
-        caller-controlled path reach a filesystem call with no finding, no
-        notification, and a `complete` audit - the exact failure this scanner
-        exists to prevent. Instead the value keeps tainting, but is marked
-        unproven so MSC103 reports incompleteness rather than asserting a guard
-        state it cannot explain.
-        """
-
-        sources = self._tracked_sources(node)
-        if not sources:
-            return _PathValue()
-        return _PathValue(sources, frozenset({id(node)}), proven=False)
-
-    def _value(self, node: ast.AST) -> _PathValue:
-        if isinstance(node, ast.Name):
-            return self.bindings.get(node.id, _PathValue())
-        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Div)):
-            return self._derived(node, [self._value(node.left), self._value(node.right)])
-        if isinstance(node, ast.JoinedStr):
-            return self._derived(
-                node,
-                [self._value(value) for value in node.values],
-            )
-        if isinstance(node, ast.FormattedValue):
-            return self._value(node.value)
-        if isinstance(node, ast.Attribute) and node.attr == "parent":
-            # `target.parent.mkdir(...)` after proving `target` is contained is the
-            # ordinary write-a-note shape. The parent of a contained path is at or
-            # above the validated file but still inside the tree that was checked.
-            return self._derived(
-                node, [self._value(node.value)], preserves_containment=True
-            )
-        # Percent formatting is ordinary path construction: "%s/%s" % (root, name).
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
-            return self._derived(node, [self._value(node.left), self._value(node.right)])
-        # Indexing, slicing, and conditional selection all preserve the value.
-        if isinstance(node, ast.Subscript):
-            return self._derived(
-                node,
-                [self._value(node.value), self._value(node.slice)],
-                preserves_containment=True,
-            )
-        if isinstance(node, ast.IfExp):
-            return self._derived(
-                node,
-                [self._value(node.body), self._value(node.orelse)],
-                preserves_containment=True,
-            )
-        if isinstance(node, ast.Starred):
-            return self._derived(
-                node, [self._value(node.value)], preserves_containment=True
-            )
-        if isinstance(node, ast.Await):
-            return self._derived(
-                node, [self._value(node.value)], preserves_containment=True
-            )
-        # A container is path-like when any element is: "/".join([root, name]).
-        if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
-            return self._derived(
-                node,
-                [self._value(item) for item in node.elts],
-                preserves_containment=True,
-            )
-        if isinstance(node, ast.Dict):
-            return self._derived(
-                node,
-                [self._value(value) for value in node.values if value is not None],
-                preserves_containment=True,
-            )
-        if isinstance(node, ast.NamedExpr):
-            return self._derived(
-                node, [self._value(node.value)], preserves_containment=True
-            )
-        if isinstance(node, ast.Constant):
-            return _PathValue()
-        if not isinstance(node, ast.Call):
-            return self._unmodeled(node)
-        imports = self.execution.imports_for(node)
-        name = _qualified_name(node.func, imports)
-        if name in {"os.fspath", "str"}:
-            values = [self._value(argument) for argument in node.args]
-            return _PathValue(
-                frozenset(source for value in values for source in value.sources),
-                frozenset(token for value in values for token in value.tokens),
-                proven=all(value.proven for value in values),
-            )
-        if name in PATH_TRANSFORM_CALLS:
-            return self._derived(
-                node,
-                [self._value(argument) for argument in node.args],
-                preserves_containment=name in CONTAINMENT_PRESERVING_CALLS,
-            )
-        if name in STRING_DERIVING_CALLS:
-            return self._derived(node, [self._value(argument) for argument in node.args])
-        if isinstance(node.func, ast.Attribute) and node.func.attr in {
-            *PATH_RETURNING_METHODS,
-            *STRING_DERIVING_METHODS,
-            "glob",
-            "iterdir",
-            "relative_to",
-            "rglob",
-        }:
-            return self._derived(
-                node,
-                [
-                    self._value(node.func.value),
-                    *[self._value(argument) for argument in node.args],
-                    *[self._value(keyword.value) for keyword in node.keywords],
-                ],
-                preserves_containment=(
-                    node.func.attr in CONTAINMENT_PRESERVING_METHODS
-                    and (
-                        node.func.attr in CONTAINMENT_PRESERVING_WITH_ARGUMENTS
-                        or not (node.args or node.keywords)
-                    )
-                ),
-            )
-        return self._unmodeled(node)
-
-    def _assign(self, targets: Iterable[ast.AST], value: _PathValue) -> None:
-        for target in targets:
-            names = _assigned_names(target)
-            if value.sources and not names:
-                # The target is a subscript, an attribute, or another form whose
-                # storage location the analyzer does not track (`d["k"] = path`,
-                # `obj.attr = path`). Binding nothing would drop the taint with no
-                # record, which is how a caller-controlled path reached an
-                # unguarded sink under a `complete` audit before 0.2.3. The value
-                # is escaping the model, so say so.
-                self._record_escape(target, value)
-                continue
-            for name in names:
-                if value.sources:
-                    if name in self.escaping_scopes:
-                        # `global X; X = path` publishes tool input to module
-                        # state that other functions read without receiving it as
-                        # an argument. That flow is outside the model, so it must
-                        # not read as clean.
-                        self._record_escape(target, value)
-                    self.bindings[name] = value
-                else:
-                    self.bindings.pop(name, None)
-
-    def _record_escape(self, node: ast.AST, value: _PathValue) -> None:
-        """Record tool input flowing into a location the analyzer cannot follow."""
-
-        self.result.escapes.append(
-            Evidence(
-                self.record.source_file,
-                _line_number(node),
-                _safe_target_description(node),
-                "tool input is stored in a location outside the supported model",
-            )
-        )
-
-    # Methods that only normalize a path: the result denotes the same file as the
-    # receiver, so proving containment of the result proves it for the receiver.
-    # `expanduser` is excluded - it can move the value to a different root.
-    NORMALIZING_METHODS = frozenset({"absolute", "resolve"})
-
-    def _normalized_bases(self, node: ast.AST) -> list[_PathValue]:
-        """Values whose containment is established by guarding `node`.
-
-        `target.resolve().relative_to(ROOT)` proves `target` is contained just as
-        much as it proves the resolved temporary is, so the guard must reach the
-        receiver. Guarding only the temporary reported correct containment code as
-        unconstrained.
-        """
-
-        values: list[_PathValue] = []
-        current = node
-        while (
-            isinstance(current, ast.Call)
-            and isinstance(current.func, ast.Attribute)
-            and current.func.attr in self.NORMALIZING_METHODS
-            and not current.args
-        ):
-            current = current.func.value
-            values.append(self._value(current))
-        return values
-
-    def _guard_tokens(self, call: ast.Call) -> set[int]:
-        if not isinstance(call.func, ast.Attribute) or not call.args:
-            return set()
-        if call.func.attr not in {"is_relative_to", "relative_to"}:
-            return set()
-        candidate = self._value(call.func.value)
-        trusted_root = self._value(call.args[0])
-        if not candidate.sources or trusted_root.sources:
-            return set()
-        tokens = set(candidate.tokens)
-        for base in self._normalized_bases(call.func.value):
-            if base.sources:
-                tokens |= base.tokens
-        return tokens
-
-    def _commonpath_guard_tokens(self, node: ast.Compare, truthy: bool) -> set[int]:
-        if len(node.ops) != 1:
-            return set()
-        equality_holds = (
-            isinstance(node.ops[0], ast.Eq) and truthy
-        ) or (
-            isinstance(node.ops[0], ast.NotEq) and not truthy
-        )
-        if not equality_holds:
-            return set()
-        if len(node.comparators) != 1:
-            return set()
-        sides = (node.left, node.comparators[0])
-        for commonpath, root in (sides, reversed(sides)):
-            if not isinstance(commonpath, ast.Call) or not commonpath.args:
-                continue
-            imports = self.execution.imports_for(commonpath)
-            if _qualified_name(commonpath.func, imports) != "os.path.commonpath":
-                continue
-            if self._value(root).sources:
-                continue
-            paths = commonpath.args[0]
-            if not isinstance(paths, (ast.List, ast.Tuple)):
-                continue
-            candidates = [self._value(item) for item in paths.elts]
-            tainted = [candidate for candidate in candidates if candidate.sources]
-            if len(tainted) == 1:
-                return set(tainted[0].tokens)
-        return set()
-
-    def _conditional_guard_tokens(self, node: ast.AST, truthy: bool) -> set[int]:
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-            return self._conditional_guard_tokens(node.operand, not truthy)
-        if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And) and truthy:
-            return {
-                token
-                for value in node.values
-                for token in self._conditional_guard_tokens(value, True)
-            }
-        if isinstance(node, ast.Call) and truthy:
-            if isinstance(node.func, ast.Attribute) and node.func.attr == "is_relative_to":
-                return self._guard_tokens(node)
-        if isinstance(node, ast.Compare):
-            return self._commonpath_guard_tokens(node, truthy)
-        return set()
-
-    def _sink_value(self, call: ast.Call) -> _PathValue:
-        path_call = self.execution.path_filesystem_calls.get(id(call))
-        if path_call is not None and isinstance(call.func, ast.Attribute):
-            values = [self._value(call.func.value)]
-            if call.func.attr in {"rename", "replace"} and call.args:
-                values.append(self._value(call.args[0]))
-            sources = frozenset(
-                source for value in values for source in value.sources
-            )
-            tokens = frozenset(token for value in values for token in value.tokens)
-            return _PathValue(
-                sources,
-                tokens,
-                proven=all(value.proven for value in values),
-            )
-
-        imports = self.execution.imports_for(call)
-        name = _qualified_name(call.func, imports)
-        indexes = (0, 1) if name in TWO_PATH_CALLS else (0,)
-        values = [self._value(call.args[index]) for index in indexes if len(call.args) > index]
-        for keyword in call.keywords:
-            if keyword.arg in {"file", "filename", "path", "src", "dst"}:
-                values.append(self._value(keyword.value))
-        sources = frozenset(source for value in values for source in value.sources)
-        tokens = frozenset(token for value in values for token in value.tokens)
-        return _PathValue(
-            sources,
-            tokens,
-            proven=all(value.proven for value in values),
-        )
-
-    def _record_sink(self, call: ast.Call) -> None:
-        path_call = self.execution.path_filesystem_calls.get(id(call))
-        imports = self.execution.imports_for(call)
-        name = _qualified_name(call.func, imports)
-        capability: Capability | None
-        if path_call is not None:
-            symbol, capability = path_call
-        else:
-            capability = _call_capability(call, name, imports)
-            symbol = name
-        if capability not in {Capability.FILESYSTEM_READ, Capability.FILESYSTEM_WRITE}:
-            return
-        value = self._sink_value(call)
-        if not value.sources or value.tokens <= self.guarded:
-            return
-        detail = (
-            "path-like tool input reaches this filesystem operation"
-            if value.proven
-            else "tool input reaches this filesystem operation through an "
-            "expression form the analyzer does not model"
-        )
-        self.result.sinks.append(
-            _PathSinkFlow(
-                value.sources,
-                Evidence(
-                    self.record.source_file,
-                    _line_number(call),
-                    symbol or _display_name(call.func, imports),
-                    detail,
-                ),
-                proven=value.proven,
-            )
-        )
-
-    def _record_expansion(self, call: ast.Call) -> None:
-        imports = self.execution.imports_for(call)
-        name = _qualified_name(call.func, imports)
-        value = _PathValue()
-        if name == "os.path.expanduser" and call.args:
-            value = self._value(call.args[0])
-        elif isinstance(call.func, ast.Attribute) and call.func.attr == "expanduser":
-            value = self._value(call.func.value)
-        self.result.expanded_sources.update(value.sources)
-
-    def _callee_bindings(self, call: ast.Call, callee: FunctionRecord) -> dict[str, _PathValue]:
-        bindings = dict(self.bindings) if id(call) in self.execution.nested_call_ids else {}
-        parameters = [
-            *callee.node.args.posonlyargs,
-            *callee.node.args.args,
-            *callee.node.args.kwonlyargs,
-        ]
-        by_name = {parameter.arg: parameter for parameter in parameters}
-        positional = [*callee.node.args.posonlyargs, *callee.node.args.args]
-        for parameter, argument in zip(positional, call.args, strict=False):
-            if not isinstance(argument, ast.Starred):
-                value = self._value(argument)
-                if value.sources:
-                    bindings[parameter.arg] = value
-        for keyword in call.keywords:
-            if keyword.arg is None or keyword.arg not in by_name:
-                continue
-            value = self._value(keyword.value)
-            if value.sources:
-                bindings[keyword.arg] = value
-        return bindings
-
-    def _follow_call(self, call: ast.Call) -> None:
-        callee = self.execution.call_edges_by_call.get(id(call))
-        if callee is None:
-            return
-        visitor = _PathFlowVisitor(
-            callee,
-            self.project,
-            self._callee_bindings(call, callee),
-            self.guarded,
-            self.result,
-            self.active,
-        )
-        self.guarded.update(visitor.scan())
-
-    def visit_Expr(self, node: ast.Expr) -> None:
-        # A call whose value is thrown away is being run for its effect, which for a
-        # call receiving tool input means storing or transmitting it.
-        if isinstance(node.value, ast.Call):
-            self.discarded_calls.add(id(node.value))
-        self.generic_visit(node)
-
-    def visit_Assert(self, node: ast.Assert) -> None:
-        # Assertions are stripped under `python -O`, so a containment check written
-        # as one may never run. Visit for taint but discard anything it proves.
-        guarded_before = set(self.guarded)
-        self.generic_visit(node)
-        self.guarded = guarded_before
-
-    def visit_Call(self, node: ast.Call) -> None:
-        self.generic_visit(node)
-        self._record_expansion(node)
-        if isinstance(node.func, ast.Attribute) and node.func.attr == "relative_to":
-            self.guarded.update(self._guard_tokens(node))
-        self._record_mutation(node)
-        self._record_sink(node)
-        self._follow_call(node)
-
-    def _record_mutation(self, node: ast.Call) -> None:
-        """Track tool input handed to a call that stores it somewhere.
-
-        `queue.append(path)` puts the input inside `queue`, so `queue` inherits the
-        taint and a later `queue[0]` reaching a filesystem call is reported.
-
-        Any other call that receives tool input and whose result is discarded is
-        storing it somewhere the analyzer does not model - `heapq.heappush(q, p)`,
-        `d.__setitem__(k, p)`, `operator.setitem(d, k, p)`, `deque.appendleft(p)`.
-        Allowlisting method names cannot keep up with those, so anything unmodeled
-        records an escape instead of silently dropping the value. Before 0.2.4 those
-        spellings produced a `complete` audit with no findings while `d[k] = p`
-        correctly degraded - the same store, reported two different ways.
-        """
-
-        arguments = [self._value(argument) for argument in node.args]
-        arguments.extend(self._value(keyword.value) for keyword in node.keywords)
-        if not any(value.sources for value in arguments):
-            return
-
-        receiver = node.func.value if isinstance(node.func, ast.Attribute) else None
-        if (
-            isinstance(node.func, ast.Attribute)
-            and node.func.attr in CONTAINER_MUTATORS
-            and isinstance(receiver, ast.Name)
-        ):
-            value = self._derived(
-                node,
-                [self._value(receiver), *arguments],
-                preserves_containment=False,
-            )
-            if value.sources:
-                self.bindings[receiver.id] = value
-            return
-
-        # Two shapes count as putting the value somewhere unmodeled:
-        #   * a call made for its effect - the result is discarded; and
-        #   * a method invoked on a local object, whatever happens to the result.
-        # The second matters because `fut = pool.submit(worker, path)` and
-        # `x = d.__setitem__(k, path)` store the value exactly as their discarded
-        # spellings do, and binding the result is the realistic form. Method calls on
-        # the tainted value itself (`name.upper()`) and on imported modules
-        # (`logging.info(name)`) are excluded: the first is a transform already
-        # tracked by `_value`, the second is not a container store.
-        stores_on_object = False
-        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
-            receiver_name = node.func.value.id
-            receiver_value = self._value(node.func.value)
-            module_alias = self.execution.imports_for(node).get(receiver_name)
-            stores_on_object = not receiver_value.sources and not module_alias
-        if id(node) not in self.discarded_calls and not stores_on_object:
-            return
-        if self.execution.call_edges_by_call.get(id(node)) is not None:
-            # A resolved local call already receives the value as a bound parameter
-            # and is followed, so nothing is lost.
-            return
-        imports = self.execution.imports_for(node)
-        if id(node) in self.execution.path_filesystem_calls or _call_capability(
-            node, _qualified_name(node.func, imports), imports
-        ) is not None:
-            # A modeled sink is reported by its own rule, not as lost lineage.
-            return
-        tainted = next(value for value in arguments if value.sources)
-        self._record_escape(node, tainted)
-
-    def visit_Assign(self, node: ast.Assign) -> None:
-        self.visit(node.value)
-        self._assign(node.targets, self._value(node.value))
-
-    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-        if node.value is not None:
-            self.visit(node.value)
-            self._assign([node.target], self._value(node.value))
-        else:
-            self._assign([node.target], _PathValue())
-
-    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
-        self.visit(node.value)
-        self._assign([node.target], self._value(node.value))
-
-    def visit_AugAssign(self, node: ast.AugAssign) -> None:
-        # `root += name` is path construction. Discarding the value here, as
-        # releases before 0.2.2 did, dropped the taint entirely.
-        self.visit(node.target)
-        self.visit(node.value)
-        self._assign(
-            [node.target],
-            self._derived(node, [self._value(node.target), self._value(node.value)]),
-        )
-
-    def visit_Delete(self, node: ast.Delete) -> None:
-        self._assign(node.targets, _PathValue())
-
-    def _definition_expressions(
-        self,
-        node: ast.FunctionDef | ast.AsyncFunctionDef,
-    ) -> None:
-        for decorator in node.decorator_list:
-            self.visit(decorator)
-        for default in [*node.args.defaults, *node.args.kw_defaults]:
-            if default is not None:
-                self.visit(default)
-
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self._definition_expressions(node)
-        self.bindings.pop(node.name, None)
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        self._definition_expressions(node)
-        self.bindings.pop(node.name, None)
-
-    def visit_Lambda(self, node: ast.Lambda) -> None:
-        for default in [*node.args.defaults, *node.args.kw_defaults]:
-            if default is not None:
-                self.visit(default)
-
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        for expression in [*node.decorator_list, *node.bases]:
-            self.visit(expression)
-        for keyword in node.keywords:
-            self.visit(keyword.value)
-        outer = self._state()
-        for statement in node.body:
-            self.visit(statement)
-        self._restore(outer)
-        self.bindings.pop(node.name, None)
-
-    def _suppresses_exceptions(self, item: ast.withitem) -> bool:
-        """Whether this context manager swallows the exception a guard relies on.
-
-        `contextlib.suppress(ValueError)` around a containment check leaves the value
-        unchecked exactly when the check fails, so nothing inside may establish a
-        guard. Detected structurally rather than by exception class, because
-        suppressing anything broad enough to catch the check is enough to defeat it.
-        """
-
-        expression = item.context_expr
-        if not isinstance(expression, ast.Call):
-            return False
-        imports = self.execution.imports_for(expression)
-        return _qualified_name(expression.func, imports) in {
-            "contextlib.suppress",
-            "suppress",
-        }
-
-    def _visit_with(self, items: list[ast.withitem], body: list[ast.stmt]) -> None:
-        suppressing = any(self._suppresses_exceptions(item) for item in items)
-        guarded_before = set(self.guarded)
-        for item in items:
-            self.visit(item.context_expr)
-            if item.optional_vars is not None:
-                self._assign([item.optional_vars], _PathValue())
-        for statement in body:
-            self.visit(statement)
-        if suppressing:
-            # Anything the body proved may not actually have run to completion.
-            self.guarded = guarded_before
-
-    def visit_With(self, node: ast.With) -> None:
-        self._visit_with(node.items, node.body)
-
-    def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
-        self._visit_with(node.items, node.body)
-
-    def _visit_for(
-        self,
-        iterator: ast.AST,
-        target: ast.AST,
-        body: list[ast.stmt],
-        orelse: list[ast.stmt],
-    ) -> None:
-        self.visit(iterator)
-        before = self._state()
-        target_value = self._derived(
-            iterator, [self._value(iterator)], preserves_containment=True
-        )
-        self._assign([target], target_value)
-        for statement in body:
-            self.visit(statement)
-        body_state = self._state()
-        self._merge_states(before, body_state)
-        for statement in orelse:
-            self.visit(statement)
-
-    def visit_For(self, node: ast.For) -> None:
-        self._visit_for(node.iter, node.target, node.body, node.orelse)
-
-    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
-        self._visit_for(node.iter, node.target, node.body, node.orelse)
-
-    def visit_While(self, node: ast.While) -> None:
-        # A while body may run zero times, so nothing it establishes is guaranteed.
-        # Without this the default traversal walked the body in place and kept its
-        # guards unconditionally, so a containment check inside a loop that never
-        # runs cleared the sink. Every other construct already merges against the
-        # not-taken path; this was the one that did not.
-        self.visit(node.test)
-        before = self._state()
-        for statement in node.body:
-            self.visit(statement)
-        body_state = self._state()
-        self._merge_states(before, body_state)
-        for statement in node.orelse:
-            self.visit(statement)
-
-    @staticmethod
-    def _terminates(statements: list[ast.stmt]) -> bool:
-        return bool(statements) and isinstance(statements[-1], (ast.Raise, ast.Return))
-
-    def visit_If(self, node: ast.If) -> None:
-        self.visit(node.test)
-        before = self._state()
-
-        self.guarded.update(self._conditional_guard_tokens(node.test, True))
-        for statement in node.body:
-            self.visit(statement)
-        body_state = self._state()
-
-        self._restore(before)
-        self.guarded.update(self._conditional_guard_tokens(node.test, False))
-        for statement in node.orelse:
-            self.visit(statement)
-        else_state = self._state()
-
-        body_continues = not self._terminates(node.body)
-        else_continues = not self._terminates(node.orelse)
-        if body_continues and else_continues:
-            self._merge_states(body_state, else_state)
-        elif body_continues:
-            self._restore(body_state)
-        elif else_continues:
-            self._restore(else_state)
-        else:
-            self._restore(before)
-
-    def _visit_try(
-        self,
-        body: list[ast.stmt],
-        handlers: list[ast.ExceptHandler],
-        orelse: list[ast.stmt],
-        finalbody: list[ast.stmt],
-    ) -> None:
-        before = self._state()
-        for statement in body:
-            self.visit(statement)
-        # A handler can be entered from any point in the body, including from the
-        # containment check itself - that is precisely when a `relative_to` raises.
-        # So the handler starts from the body's bindings, which keeps the taint, but
-        # WITHOUT any guard the body established, because the guard may be what
-        # failed. Restoring the pre-try state instead, as releases before 0.2.4 did,
-        # made the tainted binding look absent on the handler path, so the join saw
-        # only one tainted branch and carried the guard out of the try. That made
-        # `try: t = ROOT / n; t.relative_to(ROOT)` / `except ValueError: pass` report
-        # a clean audit for arbitrary traversal.
-        handler_entry = _PathFlowState(dict(self.bindings), set(before.guarded))
-        for statement in orelse:
-            self.visit(statement)
-        continuing = [] if self._terminates(orelse or body) else [self._state()]
-
-        for handler in handlers:
-            self._restore(handler_entry)
-            if handler.type is not None:
-                self.visit(handler.type)
-            if handler.name is not None:
-                self.bindings.pop(handler.name, None)
-            for statement in handler.body:
-                self.visit(statement)
-            if not self._terminates(handler.body):
-                continuing.append(self._state())
-
-        if continuing:
-            merged = continuing[0]
-            for state in continuing[1:]:
-                self._restore(merged)
-                self._merge_states(merged, state)
-                merged = self._state()
-            self._restore(merged)
-        else:
-            self._restore(before)
-        if self._transfers_control(finalbody):
-            # `finally: return ...` discards an exception still in flight, so a
-            # check in the body that raised is swallowed exactly as an `except:
-            # pass` would swallow it. Drop what the body proved.
-            self.guarded = set(before.guarded)
-        for statement in finalbody:
-            self.visit(statement)
-
-    @staticmethod
-    def _transfers_control(statements: list[ast.stmt]) -> bool:
-        """Whether these statements can leave the block, discarding an exception."""
-
-        return any(
-            isinstance(statement, (ast.Return, ast.Break, ast.Continue))
-            for statement in statements
-        )
-
-    def visit_Try(self, node: ast.Try) -> None:
-        self._visit_try(node.body, node.handlers, node.orelse, node.finalbody)
-
-    def visit_TryStar(self, node: ast.TryStar) -> None:
-        self._visit_try(node.body, node.handlers, node.orelse, node.finalbody)
-
-    @staticmethod
-    def _capture_names(pattern: ast.AST) -> set[str]:
-        """Capture names bound by a match pattern."""
-
-        names: set[str] = set()
-        for child in ast.walk(pattern):
-            if isinstance(child, ast.MatchAs) and child.name:
-                names.add(child.name)
-            elif isinstance(child, ast.MatchStar) and child.name:
-                names.add(child.name)
-            elif isinstance(child, ast.MatchMapping) and child.rest:
-                names.add(child.rest)
-        return names
-
-    def visit_Match(self, node: ast.Match) -> None:
-        # `match path: case str() as target:` binds target to the subject. Without
-        # this the capture was never bound and the taint vanished, letting an
-        # unguarded sink report `complete` with no findings before 0.2.3.
-        self.visit(node.subject)
-        subject = self._derived(
-            node, [self._value(node.subject)], preserves_containment=True
-        )
-        before = self._state()
-        states = []
-        for case in node.cases:
-            self._restore(before)
-            for name in self._capture_names(case.pattern):
-                if subject.sources:
-                    self.bindings[name] = subject
-                else:
-                    self.bindings.pop(name, None)
-            if case.guard is not None:
-                self.visit(case.guard)
-            for statement in case.body:
-                self.visit(statement)
-            if not self._terminates(case.body):
-                states.append(self._state())
-        if not states:
-            self._restore(before)
-            return
-        merged = states[0]
-        for state in states[1:]:
-            self._restore(merged)
-            self._merge_states(merged, state)
-            merged = self._state()
-        self._restore(merged)
-
-    def _visit_comprehension(
-        self,
-        generators: list[ast.comprehension],
-        values: list[ast.AST],
-    ) -> None:
-        outer = self._state()
-        for generator in generators:
-            self.visit(generator.iter)
-            self._assign(
-                [generator.target],
-                self._derived(
-                    generator.iter,
-                    [self._value(generator.iter)],
-                    preserves_containment=True,
-                ),
-            )
-            for condition in generator.ifs:
-                self.visit(condition)
-        for value in values:
-            self.visit(value)
-        self._restore(outer)
-
-    def visit_ListComp(self, node: ast.ListComp) -> None:
-        self._visit_comprehension(node.generators, [node.elt])
-
-    def visit_SetComp(self, node: ast.SetComp) -> None:
-        self._visit_comprehension(node.generators, [node.elt])
-
-    def visit_DictComp(self, node: ast.DictComp) -> None:
-        self._visit_comprehension(node.generators, [node.key, node.value])
-
-    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
-        # A generator expression is a comprehension. Visiting only the first
-        # iterable, as releases before 0.2.3 did, made every call inside the
-        # element expression invisible: `"".join(subprocess.check_output(cmd,
-        # shell=True) for _ in ...)` reported `Side effects: 0`, `Observed: none`,
-        # `complete`, exit 0 - an affirmative denial of a capability the tool has.
-        self._visit_comprehension(node.generators, [node.elt])
-
-
-def _path_scope_result(
-    project: ParsedProject,
-    tool: ToolDefinition,
-    path_parameters: set[str],
-) -> _PathScopeResult:
-    result = _PathScopeResult()
-    record = project.functions.get((tool.source_file, tool.function_name))
-    if record is None:
-        return result
-    bindings = {
-        name: _PathValue(frozenset({name}), frozenset({-(index + 1)}))
-        for index, name in enumerate(sorted(path_parameters))
-    }
-    _PathFlowVisitor(record, project, bindings, set(), result, set()).scan()
-    return result
-
-
-def _expression_identifiers(expression: str) -> frozenset[str]:
-    """Identifiers named anywhere in an unparsed call expression."""
-
-    try:
-        parsed = ast.parse(expression, mode="eval")
-    except SyntaxError:
-        return frozenset()
-    return frozenset(
-        node.id for node in ast.walk(parsed) if isinstance(node, ast.Name)
-    )
-
-
-def _guard_may_be_unresolved(
-    sources: frozenset[str],
-    unresolved_edges: Iterable[UnresolvedCallEdge],
-) -> bool:
-    """Whether unresolved work could own the guard for a path reaching a sink.
-
-    Only two shapes can retroactively constrain a value that the analyzer already
-    proved flows unguarded into a filesystem call:
-
-    * decorator/wrapper indirection, because a wrapper observes every argument and
-      can reject the call before the tool body runs; and
-    * an unresolved call that actually receives the path value, because that callee
-      may validate or raise on it.
-
-    An unresolved call that never sees the value - a dynamic import of an unrelated
-    plugin, an instance dispatch on other data - cannot make an unguarded sink safe,
-    so it must not silence the finding. Before v0.2.1 any unresolved edge anywhere in
-    the tool suppressed MSC103, which let unrelated indirection hide a traversal.
-    """
-
-    for edge in unresolved_edges:
-        if edge.reason is UnresolvedReason.WRAPPER_INDIRECTION:
-            return True
-        if sources & _expression_identifiers(edge.call_expression):
-            return True
-    return False
-
-
-def path_lineage_unproven(
-    project: ParsedProject,
-    tool: ToolDefinition,
-    *,
-    filesystem_relevant: bool,
-) -> list[Evidence]:
-    """Filesystem sinks reached through expression forms the analyzer does not model.
-
-    These make an audit incomplete rather than clean. Before 0.2.2 the taint was
-    dropped silently at these points, so a caller-controlled path reaching an
-    unguarded filesystem call could produce `complete` with no findings and exit 0.
-    """
-
-    result = _path_scope_result(
-        project,
-        tool,
-        {parameter.name for parameter in tool.parameters},
-    )
-    # Unproven sinks always matter: a filesystem call was reached and the lineage
-    # could not be explained. Escapes are only reported when the tool has some
-    # filesystem involvement, because storing a parameter in a dict is one of the
-    # most common lines in Python and says nothing on its own. Reporting them
-    # unconditionally, as 0.2.3 did, failed audits of tools that never open a file.
-    escapes = result.escapes if filesystem_relevant else []
-    return [sink.evidence for sink in result.unproven_sinks] + escapes
-
-
-def path_sink_parameters(project: ParsedProject, tool: ToolDefinition) -> set[str]:
-    """Tool parameters proven to reach an unguarded filesystem sink.
-
-    Mirrors the seeding used by `analyze_contract` so completeness reporting and
-    `MSC103` agree on which parameters actually participate in filesystem access.
-    """
-
-    result = _path_scope_result(
-        project,
-        tool,
-        {parameter.name for parameter in tool.parameters},
-    )
-    return {source for sink in result.sinks for source in sink.sources}
 
 
 def _reads_environment(node: ast.AST, execution: _ExecutionResult) -> bool:
@@ -3090,83 +2152,12 @@ def _tainted_environment_to_network(
     return None
 
 
-@dataclass(frozen=True)
-class _StaticPathDefault:
-    value: str
-    expands_home: bool = False
 
 
-def _parameter_default_nodes(
-    node: ast.FunctionDef | ast.AsyncFunctionDef,
-) -> dict[str, ast.AST]:
-    positional = [*node.args.posonlyargs, *node.args.args]
-    defaults: dict[str, ast.AST] = {
-        argument.arg: default
-        for argument, default in zip(
-            positional[-len(node.args.defaults) :],
-            node.args.defaults,
-            strict=True,
-        )
-    } if node.args.defaults else {}
-    defaults.update(
-        {
-            argument.arg: default
-            for argument, default in zip(
-                node.args.kwonlyargs,
-                node.args.kw_defaults,
-                strict=True,
-            )
-            if default is not None
-        }
-    )
-    return defaults
 
 
-def _static_path_default(
-    node: ast.AST,
-    imports: dict[str, str],
-) -> _StaticPathDefault | None:
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return _StaticPathDefault(node.value)
-    if not isinstance(node, ast.Call):
-        return None
-    name = _qualified_name(node.func, imports)
-    if name == "pathlib.Path.home" and not node.args and not node.keywords:
-        return _StaticPathDefault("~", expands_home=True)
-    if name == "os.path.expanduser" and node.args:
-        value = _static_path_default(node.args[0], imports)
-        return (
-            _StaticPathDefault(value.value, expands_home=True)
-            if value is not None
-            else None
-        )
-    if isinstance(node.func, ast.Attribute) and node.func.attr == "expanduser":
-        value = _static_path_default(node.func.value, imports)
-        return (
-            _StaticPathDefault(value.value, expands_home=True)
-            if value is not None
-            else None
-        )
-    if name == "pathlib.Path" and node.args:
-        return _static_path_default(node.args[0], imports)
-    return None
 
 
-def _dangerous_path_default(
-    node: ast.AST,
-    imports: dict[str, str],
-    expanded_in_body: bool,
-) -> str | None:
-    default = _static_path_default(node, imports)
-    if default is None:
-        return None
-    if default.value and set(default.value) == {"/"}:
-        return "the POSIX filesystem root"
-    if default.value in {"~", "~/"} and (
-        default.expands_home or expanded_in_body
-    ):
-        return "the user's home directory"
-    return None
 
 
 def _finding(
@@ -3332,116 +2323,15 @@ def analyze_contract(
     # a path position. Parameter naming is a ranking hint, never the gate: a
     # traversal through `filepath`, `target`, or `name` is the same defect as one
     # through `path`.
-    path_parameters = {parameter.name for parameter in tool.parameters}
+    # MSC103 (filesystem scope) and MSC104 (dangerous filesystem default) are
+    # withdrawn in 0.2.5. Both decided whether caller-controlled path access was
+    # reported, and both got it wrong across four consecutive candidates in
+    # alternating directions - and in the last one, still by parameter name, which
+    # is the mechanism the project's own advisory is written about. A rule that
+    # cannot decide containment reliably must not claim to: the filesystem
+    # capability and its evidence path are still reported, and the reader is told
+    # plainly that containment is not analyzed. See docs/limitations.md.
     records = reachable_functions(project, tool)
-    path_scope = _path_scope_result(project, tool, path_parameters)
-    # Suppression is scoped per sink: a sink is withheld only when unresolved work
-    # could actually own its guard. Sinks whose lineage is fully proven are still
-    # reported even if the tool contains unrelated unresolved calls.
-    unresolved_list = list(unresolved_edges)
-    # Only sinks whose lineage the analyzer can explain produce a finding. A sink
-    # reached through an unmodeled expression form still exists and is surfaced,
-    # but through the completeness ledger, because MSC103 asserts an *unguarded*
-    # path and that claim cannot be made about lineage that was not followed.
-    reportable_sinks = [
-        sink
-        for sink in path_scope.proven_sinks
-        if not _guard_may_be_unresolved(sink.sources, unresolved_list)
-    ]
-    if reportable_sinks:
-        unguarded_parameters = sorted(
-            source
-            for sink in reportable_sinks
-            for source in sink.sources
-        )
-        evidence = max(
-            reportable_sinks,
-            key=lambda sink: (
-                sink.evidence.source_file,
-                sink.evidence.line_number,
-                sink.evidence.symbol,
-            ),
-        ).evidence
-        matching_capability = next(
-            (
-                item.evidence
-                for item in observed
-                if item.capability
-                in {Capability.FILESYSTEM_READ, Capability.FILESYSTEM_WRITE}
-                and item.evidence.source_file == evidence.source_file
-                and item.evidence.line_number == evidence.line_number
-                and item.evidence.symbol == evidence.symbol
-            ),
-            None,
-        )
-        if matching_capability is not None:
-            evidence = Evidence(
-                evidence.source_file,
-                evidence.line_number,
-                evidence.symbol,
-                evidence.detail,
-                matching_capability.path,
-            )
-        findings.append(
-            _finding(
-                "MSC103",
-                "Filesystem scope is not constrained",
-                Severity.HIGH,
-                tool,
-                f"Path-like parameter(s) {sorted(set(unguarded_parameters))} reach filesystem "
-                "operations without a recognized containment check.",
-                "Resolve the candidate path and prove it remains beneath a fixed, "
-                "trusted root before access.",
-                evidence,
-            )
-        )
-
-    tool_record = project.functions.get((tool.source_file, tool.function_name))
-    default_nodes = (
-        _parameter_default_nodes(tool_record.node)
-        if tool_record is not None
-        else {}
-    )
-    # A path-like name still qualifies on its own, because a dangerous root default
-    # is a contract defect even when the parameter is only forwarded. Proven
-    # filesystem participation qualifies a differently named parameter. Naming is
-    # deliberately NOT widened here: a bare `sep: str = "/"` or `prefix: str = "/"`
-    # that never reaches a filesystem sink is not a dangerous filesystem default.
-    sink_sources = {source for sink in path_scope.sinks for source in sink.sources}
-    for parameter in tool.parameters:
-        if not (
-            _is_path_parameter_name(parameter.name)
-            or parameter.name in sink_sources
-            or parameter.name in path_scope.expanded_sources
-        ):
-            continue
-        default_node = default_nodes.get(parameter.name)
-        if default_node is None or tool_record is None:
-            continue
-        dangerous_default = _dangerous_path_default(
-            default_node,
-            tool_record.imports,
-            parameter.name in path_scope.expanded_sources,
-        )
-        if dangerous_default is not None:
-            findings.append(
-                _finding(
-                    "MSC104",
-                    "Dangerous filesystem default",
-                    Severity.HIGH,
-                    tool,
-                    f"Parameter '{parameter.name}' defaults to {parameter.default}, "
-                    "expanding access beyond a project root.",
-                    "Remove the caller-controlled root and bind access to a fixed "
-                    "application directory.",
-                    Evidence(
-                        tool.source_file,
-                        _line_number(default_node),
-                        f"{parameter.name} default",
-                        f"{parameter.name}={parameter.default}",
-                    ),
-                )
-            )
 
     for record in records:
         flow = _tainted_environment_to_network(record, project)

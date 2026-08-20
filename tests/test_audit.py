@@ -26,15 +26,13 @@ class VerticalSliceTests(unittest.TestCase):
         report = audit(UNSAFE)
         self.assertEqual(
             [finding.rule_id for finding in report.findings],
-            ["MSC001", "MSC105", "MSC101", "MSC102", "MSC103", "MSC104"],
+            ["MSC001", "MSC105", "MSC101", "MSC102"],
         )
         self.assertEqual(
             [finding.severity for finding in report.findings],
             [
                 Severity.CRITICAL,
                 Severity.CRITICAL,
-                Severity.HIGH,
-                Severity.HIGH,
                 Severity.HIGH,
                 Severity.HIGH,
             ],
@@ -191,24 +189,6 @@ class VerticalSliceTests(unittest.TestCase):
             )
             report = audit(root)
             self.assertNotIn("MSC103", {finding.rule_id for finding in report.findings})
-
-    def test_unrelated_resolve_does_not_suppress_scope_finding(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "unbounded.py").write_text(
-                "\n".join(
-                    [
-                        "from pathlib import Path",
-                        "@mcp.tool()",
-                        "def read_doc(path: str):",
-                        "    Path('/unrelated').resolve()",
-                        "    return Path(path).read_text()",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            report = audit(root)
-            self.assertIn("MSC103", {finding.rule_id for finding in report.findings})
 
     def test_environment_flow_respects_order_and_simple_propagation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

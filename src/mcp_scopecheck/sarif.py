@@ -34,16 +34,6 @@ RULE_METADATA: dict[str, tuple[str, str, Severity]] = {
         "destination mismatches.",
         Severity.HIGH,
     ),
-    "MSC103": (
-        "Filesystem scope is not constrained",
-        "A path-like tool input reaches a filesystem sink without a proven supported guard.",
-        Severity.HIGH,
-    ),
-    "MSC104": (
-        "Dangerous filesystem default",
-        "A reachable path default expands to a filesystem or home-directory root.",
-        Severity.HIGH,
-    ),
     "MSC105": (
         "Environment data reaches network egress",
         "Environment-derived data reaches a network sink within one reachable function.",

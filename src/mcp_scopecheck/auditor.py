@@ -9,19 +9,15 @@ from pathlib import Path
 from .analyzer import (
     MAX_RESOLVED_LOCAL_EDGES,
     MAX_UNRESOLVED_LOCAL_EDGES,
-    _is_path_parameter_name,
     analyze_capabilities,
     analyze_contract,
     analyze_reachability,
-    path_lineage_unproven,
-    path_sink_parameters,
 )
 from .models import (
     AnalysisCompleteness,
     AnalysisNotification,
     AnalysisStatus,
     AuditReport,
-    Capability,
 )
 from .parser import parse_project
 
@@ -189,71 +185,6 @@ def audit(target: str | Path) -> AuditReport:
     resolved_edges = resolved_edges[:MAX_RESOLVED_LOCAL_EDGES]
     unresolved_edges = unresolved_edges[:MAX_UNRESOLVED_LOCAL_EDGES]
     notifications = []
-    tools_by_name = {tool.name: tool for tool in project.tools}
-    # Notify when a tool's unresolved work could hide filesystem-scope evidence.
-    # Two disjoint cases qualify, and both are needed:
-    #   1. A parameter is proven to reach an unguarded filesystem sink. This is
-    #      exactly the condition under which `analyze_contract` withholds MSC103,
-    #      and it is name-independent, so it now covers `filepath`/`target`/`name`.
-    #   2. The tool declares a path-like parameter but no sink was proven, because
-    #      the lineage itself runs through the unresolved call. Naming is the only
-    #      signal left when the flow cannot be followed, so it is retained here as
-    #      a fallback rather than as the primary gate.
-    # A tool with neither has no filesystem-scope inference to report on; its
-    # unresolved edges are already listed in the ledger above.
-    path_relevant: dict[str, bool] = {}
-    for edge in unresolved_edges:
-        unresolved_tool = tools_by_name.get(edge.tool_name)
-        if unresolved_tool is None:
-            continue
-        relevant = path_relevant.get(unresolved_tool.key)
-        if relevant is None:
-            relevant = bool(path_sink_parameters(project, unresolved_tool)) or any(
-                _is_path_parameter_name(parameter.name)
-                for parameter in unresolved_tool.parameters
-            )
-            path_relevant[unresolved_tool.key] = relevant
-        if not relevant:
-            continue
-        notifications.append(
-            AnalysisNotification(
-                "MSC103-GUARD-UNKNOWN",
-                "MSC103 filesystem-scope inference may be incomplete for tool "
-                f"{unresolved_tool.name!r}: an unresolved reachable call could "
-                "carry guard state",
-                edge.source_file,
-                edge.line_number,
-            )
-        )
-    # A filesystem sink reached through an expression form the analyzer does not
-    # model must never render as a clean audit. Surfacing it here keeps the
-    # "report what cannot be proven" contract that the exit-code and completeness
-    # states depend on.
-    unproven_lineage = False
-    for tool in project.tools:
-        # A store only hides filesystem scope if the tool touches the filesystem or
-        # declares a path-shaped input; otherwise it is ordinary data handling.
-        filesystem_relevant = any(
-            item.capability
-            in {Capability.FILESYSTEM_READ, Capability.FILESYSTEM_WRITE}
-            for item in capabilities.get(tool.key, [])
-        ) or any(
-            _is_path_parameter_name(parameter.name) for parameter in tool.parameters
-        )
-        for evidence in path_lineage_unproven(
-            project, tool, filesystem_relevant=filesystem_relevant
-        ):
-            unproven_lineage = True
-            notifications.append(
-                AnalysisNotification(
-                    "MSC103-LINEAGE-UNPROVEN",
-                    "filesystem scope was not inferred for tool "
-                    f"{tool.name!r}: {evidence.detail} ({evidence.symbol})",
-                    evidence.source_file,
-                    evidence.line_number,
-                )
-            )
-
     failed_diagnostic = any(
         diagnostic.status is AnalysisStatus.FAILED for diagnostic in project.diagnostics
     )
@@ -286,7 +217,6 @@ def audit(target: str | Path) -> AuditReport:
     elif (
         partial_diagnostic
         or unresolved_edges
-        or unproven_lineage
         or project.potential_registrations
     ):
         status = AnalysisStatus.PARTIAL

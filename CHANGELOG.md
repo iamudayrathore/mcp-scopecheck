@@ -1,6 +1,49 @@
 # Changelog
 
-## 0.2.4 - 2026-08-19
+## 0.2.5 - 2026-08-19
+
+Withdraws `MSC103` and `MSC104`. 0.2.2, 0.2.3, and 0.2.4 were never published.
+
+Both rules decided whether caller-controlled filesystem access was constrained.
+Across four consecutive release candidates they got that wrong in alternating
+directions - too permissive, too strict, permissive again through new mechanisms,
+and finally still gated on whether a parameter was named `path` rather than
+`title`, which is the mechanism the project's own draft advisory is written about.
+Each fix was correct for the case that motivated it, and the class survived every
+time. A rule that cannot decide a property reliably must not claim to.
+
+- Removed `MSC103` and `MSC104`, the containment machinery behind them (about 1,000
+  lines), the `MSC103-GUARD-UNKNOWN` and `MSC103-LINEAGE-UNPROVEN` notifications,
+  and their entries in the SARIF rule catalogue. Restoring them needs path-aware
+  dataflow rather than the token-set model that failed; that is a design change.
+- Kept filesystem capability reporting and its evidence path, which are decided by
+  the call graph rather than by the guard model. A report still states that a tool
+  reaches a filesystem operation and how; it no longer states whether the path is
+  contained, and the documentation says so plainly.
+- Fixed a capability that vanished when a helper built the path itself:
+  `def _resolve(n): return ROOT / n` followed by `_resolve(name).write_text(body)`
+  reported `Observed: none` under a `complete` audit - an arbitrary
+  caller-controlled write, denied outright, and the denial changed with the
+  parameter's name. A resolvable project-local callee that returns a path
+  expression is now recognised as returning a path.
+- Stopped inventing filesystem capabilities. A receiver the analyzer only infers to
+  be a path must be used with a pathlib-exclusive method before a capability is
+  asserted, so an in-memory cache calling `ENTRIES[key].touch()` is no longer
+  reported as a filesystem write, and no longer produces a `readOnlyHint` conflict.
+- `scripts/validate_release.py` drops the containment groups and grows its
+  capability-visibility and benign coverage: 108 checks, including the routes that
+  previously denied a capability and the in-memory shapes that previously invented
+  one.
+- No change to the exit-code contract, the no-execution invariant, the resource
+  limits, the SARIF schema, or the snapshot digest payload.
+
+
+## 0.2.4 - never published
+
+Superseded by 0.2.5 before release. A fifth pre-release audit obtained exit `0`
+with completeness `complete` on real traversal four ways, and found the outcome
+still decided by parameter name. The changes below shipped as part of 0.2.5.
+
 
 Rewrites the `MSC103` containment model. 0.2.2 and 0.2.3 were never published.
 

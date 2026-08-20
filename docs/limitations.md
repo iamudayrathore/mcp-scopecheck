@@ -1,6 +1,6 @@
 # Limitations
 
-MCP ScopeCheck v0.2.4 performs bounded Python AST analysis over a local file or
+MCP ScopeCheck v0.2.5 performs bounded Python AST analysis over a local file or
 directory. It never imports or executes audited source, starts an MCP server,
 installs target dependencies, or inspects installed packages.
 
@@ -41,17 +41,13 @@ statically recognizable:
 ## Rule boundaries
 
 Cross-module capability facts can inform `MSC101`, `MSC102`, `MSC106`, `MSC107`,
-and `MSC108`. `MSC103` requires supported argument lineage and recognized guard
-state across the path. Suppression is per sink and applies only when unresolved
-work could own that sink's guard: wrapper/decorator indirection, or an unresolved
-call that actually receives the path value. Unrelated unresolved calls elsewhere
-in the tool no longer suppress the rule, and incompleteness is still reported. `MSC105` remains same-function. v0.2.4 does not implement
+and `MSC108`. `MSC105` remains same-function. v0.2.5 does not implement
 cross-module environment-to-network taint or general interprocedural data flow.
 
 Sink coverage is an allowlist for **every** capability, not only network.
 Filesystem, process, and dynamic-code sinks are modeled sets of APIs, and an API
 outside a set is not reported at all - the tool will state `Observed: none` for a
-capability it does not model. v0.2.4 covers `subprocess.*`,
+capability it does not model. v0.2.5 covers `subprocess.*`,
 `asyncio.create_subprocess_*`, `os.system`/`popen`/`startfile`, `os.exec*`,
 `os.spawn*`, `os.posix_spawn*`, `os.fork`/`forkpty`, `pty.spawn`/`fork`/`openpty`,
 and `multiprocessing.Process` for process execution, and `eval`, `exec`,
@@ -61,34 +57,30 @@ C extension, or any other unmodeled route is not detected. Releases before 0.2.2
 modeled only `subprocess.*`, `asyncio.create_subprocess_*`, `os.system`,
 `os.popen`, `eval`, and `exec`.
 
-Path taint propagates through ordinary construction and through control-flow
-joins, and fails closed when it cannot. An expression form outside the modeled
-set does not clear the value: the sink is recorded as `MSC103-LINEAGE-UNPROVEN`,
-the audit becomes partial, and the exit status is `2`. `MSC103` is withheld in
-that case because the rule asserts a path is *unguarded*, which cannot be claimed
-about lineage that was not followed. Releases before 0.2.2 dropped such taint
-silently and could report `complete` with no findings and exit `0` for a tool
-performing unrestricted caller-controlled file access.
+**Filesystem containment is not analyzed.** `MSC103` and `MSC104` were withdrawn
+in 0.2.5. They decided whether caller-controlled filesystem access was constrained,
+and did so incorrectly across four consecutive release candidates in alternating
+directions: too permissive, then too strict, then permissive again through new
+mechanisms, and finally still gated on whether a parameter was named `path` rather
+than `title`. Each fix was correct for the case that motivated it and the class
+survived.
 
-Guard recognition is deliberately narrow, and narrow in the safe direction. A
-containment proof is established only by a recognized check whose failure path
-cannot be swallowed, and is dropped by any derivation that adds a component or
-changes the root. Correct code using an unrecognized guard form - a literal
-allowlist, or `realpath` plus `startswith(root + os.sep)` - is therefore reported.
-That is a false positive, and it is preferred over the alternative: a guard model
-that spreads optimistically reported real traversal as clean in 0.2.1, 0.2.2, and
-0.2.3 by three different mechanisms.
+What remains is sound and is what ScopeCheck now reports: a tool reaches a
+filesystem operation, and here is the call path to it. Whether the path is
+contained beneath an intended root is left to the reader. Do not infer from a clean
+audit that a tool's filesystem access is bounded — ScopeCheck does not evaluate
+that, and says so rather than guessing.
+
+Restoring these rules requires path-aware dataflow that can express "this value is
+provably beneath this root" across control flow and derivation, rather than the
+token-set model that failed. That is a design change, not a patch.
 
 A path that reaches a filesystem call through a route the analyzer does not model
-- returned from a local helper, taken out of a container, handed to a callback -
-is reported as incompleteness rather than silently omitted. Releases before 0.2.4
-reported `Observed: none` for such tools, denying a capability they have.
-
-Lambda bodies are not visited, and a tool whose only capability is inside a lambda
-is currently reported as `complete` rather than `partial`. A module-level instance
-of a same-file class (`_runner = Runner()` then `_runner.run(x)`) is likewise not
-recorded as an unresolved edge. Both are known gaps where the analysis is not
-fail-closed.
+is still reported as incompleteness rather than omitted, so `Observed: none` is not
+produced for a tool that does touch the filesystem. A receiver the analyzer only
+infers to be a path must use a pathlib-exclusive method before a capability is
+asserted, so an in-memory cache calling `.touch()` is not reported as a filesystem
+write.
 
 `MSC001` matches deterministic wording families, and those families differ in
 precision. Unambiguous directive families are Critical. The `credential-handling

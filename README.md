@@ -48,8 +48,6 @@ $ mcp-scopecheck audit examples/unsafe_docs_server
 [CRITICAL] MSC105 Environment data reaches network egress
 [HIGH] MSC101 Read-only claim conflicts with reachable behavior
 [HIGH] MSC102 External network egress requires review
-[HIGH] MSC103 Filesystem scope is not constrained
-[HIGH] MSC104 Dangerous filesystem default
 ```
 
 The paired hardened fixture retains its intended filesystem-read capability but returns `Findings (0)` and exits `0`.
@@ -82,7 +80,7 @@ jobs:
         with:
           target: path/to/python/server
           fail-on: high
-          version: "0.2.4"      # scanner version, independent of the pin above
+          version: "0.2.5"      # scanner version, independent of the pin above
       - uses: github/codeql-action/upload-sarif@<pinned-sha>
         if: always()
         with:
@@ -145,12 +143,28 @@ side effect in a fixture and proves it does not execute during an audit.
 | `MSC001` | High/Critical | Deterministic indicator families find agent-directed wording. Unambiguous directives (override, concealment, covert transfer, hidden-token markers, privileged-role impersonation) are Critical; ambiguous credential-handling and cross-call sequencing wording is High |
 | `MSC101` | High/Critical | `readOnlyHint=true` conflicts with justified state-changing behavior; process and dynamic code conflicts are Critical |
 | `MSC102` | High | Mandatory external-egress review for modeled network sinks: every modeled external and dynamic/computed destination is flagged, since neither prose nor a matching service hostname proves the destination; only local/loopback/private destinations are exempt. Specialized subtypes report explicit-denial contradictions and destination mismatches |
-| `MSC103` | High | A tool parameter reaches a filesystem operation in a path position without a recognized guard on that value. Participation is decided by dataflow, not parameter naming, and propagates through ordinary path construction. Lineage the analyzer cannot follow makes the audit partial instead of producing a finding |
-| `MSC104` | High | A path-like or filesystem-reaching parameter defaults to the POSIX root or to an exact home root that code actually expands |
 | `MSC105` | Critical | Environment-derived data reaches a supported module or proven client-instance network sink in the same reachable function |
 | `MSC106` | Critical | Process or shell execution is reachable, for the modeled process-launching APIs (allowlist; see limitations) |
 | `MSC107` | Critical | Dynamic code execution is reachable, for the modeled APIs: `eval`, `exec`, `compile`, `runpy`, `code`, and `types.FunctionType` (allowlist; see limitations) |
 | `MSC108` | High | `openWorldHint=false` conflicts with reachable external network interaction |
+
+### Filesystem containment is not analyzed
+
+`MSC103` and `MSC104` are **withdrawn as of 0.2.5.** They attempted to decide
+whether caller-controlled filesystem access was constrained, and across four
+consecutive release candidates they got that wrong in alternating directions — the
+last of them still deciding the outcome by whether a parameter happened to be named
+`path` rather than `title`.
+
+ScopeCheck still reports **that** a tool reaches a filesystem operation, with the
+call path to it, because that is decided by the call graph. It does not report
+whether the path is contained. If you need that judgement, read the evidence trace
+and make it yourself; the
+[5-S pre-install checklist](docs/review-checklist.md) covers what to look for.
+
+A rule that cannot decide a property reliably should not claim to. Restoring these
+requires path-aware dataflow rather than the token-set model that failed, and that
+is a design change, not a patch.
 
 Observed capabilities are reported separately from findings. Filesystem reads are not automatically vulnerabilities; the contract comparison determines whether the behavior is inconsistent or insufficiently constrained.
 
@@ -231,27 +245,7 @@ and recall have not yet been measured against a large corpus of real MCP tool
 descriptions; the bundled corpus is a small regression fixture, not a benchmark.
 `MSC102` compares the statically resolved egress destination against the
 description and never lets prose suppress a finding; an unresolved destination is
-always flagged. `MSC103` seeds from every declared tool parameter and correlates path aliases and
-transformations with the guarded value; only path argument positions count, so a
-data argument beside a path is not treated as one. Taint propagates through
-ordinary path construction - concatenation, f-strings, `%`, `.format`, `.join`,
-`os.path.join`, `.strip`/`.replace`/`.removeprefix` and the rest of the string
-family, indexing, ternaries, tuple unpacking, augmented assignment, and
-control-flow joins. A value tainted on any reachable branch is tainted after the
-join. Containment is a proven fact about a value rather than a mark that spreads:
-it is established only by a check whose failure cannot be swallowed, survives only
-pure normalization and rebinding, and is dropped by anything that adds a path
-component or changes the root - so proving `t` is contained proves nothing about
-`t / x` or `t.expanduser()`. A check inside a `try` whose handler continues, or
-inside `contextlib.suppress`, establishes nothing, because that is exactly the path
-taken when the check fails. Lineage running
-through an expression form outside that model does **not** silently clear: the
-sink is reported in the completeness ledger as `MSC103-LINEAGE-UNPROVEN`, the
-audit becomes partial, and the exit status is `2`. `.resolve()` alone is only
-normalization. A sink is withheld only when unresolved work could own its
-guard - wrapper/decorator indirection, or an unresolved call that receives the
-path value - so unrelated indirection elsewhere in the tool no longer hides a
-proven traversal. `MSC105` follows direct
+always flagged. `MSC105` follows direct
 environment reads, simple value assignments, and proven local HTTP-client
 bindings in lexical order within one function. Reassignment and deletion kill a
 client binding. ScopeCheck does not model complete Python control flow, general
@@ -259,9 +253,7 @@ points-to relationships, or interprocedural environment taint. Cross-module
 environment-to-network taint is explicitly outside v0.2.
 
 `MSC101`, `MSC102`, `MSC106`, `MSC107`, and `MSC108` may consume unambiguous
-cross-module capability reachability. `MSC103` consumes cross-module evidence
-only when supported argument lineage and guard state are proven; otherwise it is
-suppressed and incompleteness is reported. `MSC105` remains same-function.
+cross-module capability reachability. `MSC105` remains same-function.
 
 Audits fail with exit `2` when fixed safety limits are exceeded:
 1 MB per file, 5,000 Python files, 20 MB total source, 500,000 AST nodes, 200 AST

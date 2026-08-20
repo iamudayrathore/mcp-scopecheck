@@ -197,7 +197,8 @@ methods remain network capabilities but are not guessed to be writes.
 `openWorldHint=false`.
 
 Unambiguous cross-module capability evidence may feed `MSC101`, `MSC102`,
-`MSC106`, `MSC107`, and `MSC108`. `MSC103` follows a cross-module path only when
+`MSC106`, `MSC107`, and `MSC108`.
+
 the direct argument mapping and recognized guard lineage remain supported; an
 unresolved lineage suppresses that inference and produces a completeness
 notification. `MSC105` remains same-function and does not carry taint across a
@@ -234,51 +235,9 @@ outside the recognized set (`pycurl`, `smtplib`, `ftplib`, `websockets`, DNS
 resolvers) is likewise unmodeled. Proven instance methods require a known
 supported constructor binding that remains live at that statement.
 
-`MSC103` tracks every declared tool parameter through simple aliases, supported
-path transformations, and supported direct local helper calls. Participation is
-decided by dataflow rather than by naming: `_sink_value` reads only path
-positions - the receiver of a proven `pathlib.Path` method, argument 0, argument 1
-of a two-path call such as `shutil.move`, and the `file`/`filename`/`path`/`src`/
-`dst` keywords - so a parameter becomes a sink source only when it genuinely
-occupies a path position. Parameter naming is retained as a ranking and fallback
-signal (`MSC104` qualification, and completeness notification when lineage cannot
-be followed), never as the gate for `MSC103`. Releases before 0.2.1 gated on
-naming and therefore missed traversals through parameters such as `filepath`,
-`target`, and `name`. A guard applies only to the value lineage checked before
-the sink. Recognized forms are a successful `Path.relative_to(fixed_root)` call,
-a checked `Path.is_relative_to(fixed_root)` branch whose rejecting path
-terminates, and an equality check between `os.path.commonpath(...)` and an
-untainted root. Containment is dropped by any derivation that adds a path component or changes the
-root, and by a check whose exception is swallowed by an enclosing handler or by
-`contextlib.suppress`.
-Calling a guard-like method on an unrelated value or merely normalizing with
-`resolve()` does not constrain a sink. This remains static evidence: it does not
-prove symlink safety, eliminate time-of-check/time-of-use races, or model dynamic
-dispatch and arbitrary validation helpers.
-
-Path values propagate through concatenation, `/`, f-strings, `%` formatting,
-`.format`, `.join`, the string-deriving method family (`.strip`, `.lstrip`,
-`.rstrip`, `.replace`, `.removeprefix`, `.removesuffix`, `.encode`, `.decode` and
-peers), `os.path.join`, `os.sep.join`, `posixpath.join`, `urllib.parse.unquote`,
-subscripting and slicing, conditional expressions, walrus bindings, container
-literals, starred arguments, augmented assignment, and tuple unpacking. At a
-control-flow join taint unions, and containment survives only where it is proven on
-every path that carries the tainted value. A branch that rebinds the name to an
-untainted value contributes no tainted lineage and does not dissolve the other
-branch's proof; a branch that leaves the tainted binding in place without proving
-containment does. An exception handler is entered from any point in its `try` body,
-including from the containment check itself, so it starts without the proofs that
-body established. Any other expression form yields an *unproven*
-value - it still taints, so the sink is not lost, but `MSC103` is withheld and the
-sink is reported through the completeness ledger instead, because the rule asserts
-an unguarded path and that assertion cannot be made about unfollowed lineage.
-
-`MSC104` statically recognizes the POSIX root in string and supported
-`pathlib.Path` defaults. Exact `~` and `~/` defaults are treated as the home root
-only when the default or reachable code applies `Path.expanduser`,
-`os.path.expanduser`, or `Path.home`. Bounded values such as `~/.scopecheck` are
-not equated with the entire home directory. v0.2 does not normalize Windows drive
-roots or UNC shares, and unresolved dynamic defaults are left unknown.
+`MSC103` and `MSC104` are withdrawn as of 0.2.5; see `docs/limitations.md`. The
+filesystem capability and its evidence path are still produced by the call-graph
+analysis described above. No containment judgement is made.
 
 `MSC105` follows direct environment reads and simple name-to-name or payload
 assignments in lexical order within one reachable function. Network sinks include
