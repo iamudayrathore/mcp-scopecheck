@@ -78,7 +78,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: iamudayrathore/mcp-scopecheck@94fc1b2296dab61ea67ad7dfbda244a85186c8a9
+      - uses: iamudayrathore/mcp-scopecheck@5474736d301dd20934b79318ac8a5f5623e7e43c
         with:
           target: path/to/python/server
           fail-on: high
@@ -99,6 +99,11 @@ anything other than a full SHA.
 Release tags in this repository are additionally protected against updates and
 deletions, but pin the SHA regardless - do not extend trust to a tag in any
 repository whose protection you have not verified.
+
+The pinned commit determines which scanner version the action installs, because
+`action.yml` pins that version at the commit you reference. Pin a commit whose
+action installs the release you want, or set the `version` input explicitly. The
+commit above installs the current release.
 
 The action writes SARIF by default and fails the step on a nonzero audit,
 including exit `2`, because a partial or failed analysis is not a clean result.
