@@ -169,6 +169,13 @@ def _decode_python_source(source: bytes) -> str:
     except (SyntaxError, UnicodeDecodeError) as exc:
         detail = exc.msg if isinstance(exc, SyntaxError) else str(exc)
         raise SourceDecodeError(f"invalid Python source encoding: {detail}") from exc
+    except LookupError as exc:
+        # A declared codec that exists but is not a text encoding - `rot13`,
+        # `base64`, `hex`, `bz2`, `zlib`, `quopri`, `uu`. CPython raises here rather
+        # than at decode time, so catching it only around `.decode` let a crafted
+        # coding cookie crash the audit with exit 1 and no output, which the exit
+        # contract defines as "complete, findings at threshold".
+        raise SourceDecodeError(f"invalid Python source encoding: {exc}") from exc
     try:
         return source.decode(encoding, errors="strict")
     except LookupError as exc:

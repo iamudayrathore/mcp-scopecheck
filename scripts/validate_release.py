@@ -139,6 +139,98 @@ LINEAGE = {
     "generator_expression": '    return "".join(open(name).read() for _ in range(1))',
 }
 
+# Defeated guards. Each of these performs a containment check that cannot actually
+# constrain the sink - the exception is swallowed, or the guarded value is not the
+# one that reaches the sink. None may produce a clean result. Every case here was a
+# false clean in a release that shipped its gate green.
+DEFEATED_GUARDS = {
+    "try_except_pass": (
+        "    try:\n"
+        "        t = ROOT / name\n"
+        "        t.relative_to(ROOT)\n"
+        "    except ValueError:\n"
+        "        pass\n"
+        "    t.read_text()"
+    ),
+    "try_except_bare": (
+        "    try:\n"
+        "        t = ROOT / name\n"
+        "        t.relative_to(ROOT)\n"
+        "    except Exception:\n"
+        "        _ = 1\n"
+        "    t.read_text()"
+    ),
+    "try_except_finally": (
+        "    try:\n"
+        "        t = ROOT / name\n"
+        "        t.resolve().relative_to(ROOT)\n"
+        "    except ValueError:\n"
+        "        _ = 1\n"
+        "    finally:\n"
+        "        _ = 2\n"
+        "    t.read_text()"
+    ),
+    "contextlib_suppress": (
+        "    import contextlib\n"
+        "    t = ROOT / name\n"
+        "    with contextlib.suppress(ValueError):\n"
+        "        t.relative_to(ROOT)\n"
+        "    t.read_text()"
+    ),
+    "guard_then_escape_upward": (
+        "    t = ROOT / name\n"
+        "    t.resolve().relative_to(ROOT)\n"
+        '    (t / ".." / ".." / "etc" / "passwd").read_text()'
+    ),
+    "guard_then_expanduser": (
+        "    t = ROOT / name\n"
+        "    t.resolve().relative_to(ROOT)\n"
+        "    t.expanduser().read_text()"
+    ),
+    "guard_then_join": (
+        "    t = ROOT / name\n"
+        "    t.resolve().relative_to(ROOT)\n"
+        '    t.joinpath("..", "..", "etc").read_text()'
+    ),
+    "guard_other_value": (
+        "    a = ROOT / name\n"
+        "    b = ROOT / (name + '.bak')\n"
+        "    a.resolve().relative_to(ROOT)\n"
+        "    b.read_text()"
+    ),
+    "write_after_defeated_guard": (
+        "    try:\n"
+        "        t = ROOT / name\n"
+        "        t.relative_to(ROOT)\n"
+        "    except ValueError:\n"
+        "        pass\n"
+        '    t.write_text("x")'
+    ),
+}
+
+# Stores that put tool input somewhere the analyzer does not track. Whatever the
+# spelling, none may produce a clean result: `d[k] = p` and `d.__setitem__(k, p)`
+# are the same operation and must be reported the same way.
+UNTRACKED_STORES = {
+    "subscript": '    r = {}\n    r["t"] = name\n    open(r["t"]).read()',
+    "dunder_setitem": '    r = {}\n    r.__setitem__("t", name)\n    open(r["t"]).read()',
+    "operator_setitem": (
+        "    import operator\n    r = {}\n"
+        '    operator.setitem(r, "t", name)\n    open(r["t"]).read()'
+    ),
+    "heapq_heappush": (
+        "    import heapq\n    q = []\n"
+        "    heapq.heappush(q, name)\n    open(q[0]).read()"
+    ),
+    "deque_appendleft": (
+        "    import collections\n    q = collections.deque()\n"
+        "    q.appendleft(name)\n    open(q[0]).read()"
+    ),
+    "attribute": (
+        "    class Box:\n        t = None\n    Box.t = name\n    open(Box.t).read()"
+    ),
+}
+
 # Execution primitives. Each must report its capability and the matching Critical
 # rule, and must never render "Observed: none".
 EXECUTION = {
@@ -209,6 +301,22 @@ BENIGN = {
     "data_argument": '    (ROOT / "report.txt").write_text(name.strip())',
     "no_filesystem": "    return name.upper()",
     "separator_split": "    return '|'.join(name.split('/'))",
+    "pure_dict_store": (
+        "    envelope = {}\n"
+        '    envelope["message"] = name\n'
+        '    envelope["length"] = len(name)\n'
+        "    return envelope"
+    ),
+    "search_result_store": (
+        '    results = {"query": name}\n'
+        '    results["hits"] = [name.upper()]\n'
+        "    return results"
+    ),
+    "guard_then_normalize_only": (
+        "    t = ROOT / name\n"
+        "    t.resolve().relative_to(ROOT)\n"
+        "    t.resolve().read_text()"
+    ),
 }
 
 HOSTILE = {
@@ -217,6 +325,9 @@ HOSTILE = {
     "invalid_utf8": b"# -*- coding: utf-8 -*-\nx = '\xff\xfe'\n",
     "nul_byte": b"x = 1\x00\n",
     "syntax_error": b"def broken(:\n    pass\n",
+    "rot13_codec": b"# -*- coding: rot13 -*-\nx = 1\n",
+    "base64_codec": b"# -*- coding: base64 -*-\nx = 1\n",
+    "zlib_codec": b"# -*- coding: zlib -*-\nx = 1\n",
 }
 
 FORGERY = {
@@ -257,6 +368,30 @@ def main() -> int:
             code != 0,
             f"exit {code}: clean result on caller-controlled path",
         )
+
+    for label, body in DEFEATED_GUARDS.items():
+        code, out = validator.audit(validator.server(body))
+        validator.check(
+            f"defeated_guard/{label}",
+            code != 0,
+            f"exit {code}: containment check cannot constrain this sink\n{out[-400:]}",
+        )
+
+    for label, body in UNTRACKED_STORES.items():
+        code, _ = validator.audit(validator.server(body))
+        validator.check(
+            f"untracked_store/{label}",
+            code != 0,
+            f"exit {code}: tool input stored out of model, reported clean",
+        )
+
+    code, _ = validator.audit(
+        validator.server(
+            "    global _PENDING\n    _PENDING = name\n    open(_PENDING).read()",
+            preamble="_PENDING = ''",
+        )
+    )
+    validator.check("untracked_store/global_write", code != 0, f"exit {code}")
 
     for label, (body, rule) in EXECUTION.items():
         code, out = validator.audit(

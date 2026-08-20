@@ -95,5 +95,41 @@ class SourceEncodingTests(unittest.TestCase):
         self.assertNotIn("encoding", project.diagnostics[0].message)
 
 
+class NonTextCodecTests(unittest.TestCase):
+    """A declared codec that is not a text encoding must fail closed, not crash.
+
+    CPython raises LookupError from `tokenize.detect_encoding`, not from `.decode`,
+    so catching it only around the decode let a crafted coding cookie escape as an
+    unhandled exception: exit 1 with no output. Exit 1 means "complete, findings at
+    threshold" in the documented contract, so a workflow branching on the exit code
+    read a crash as a scan result, and SARIF output was empty despite the promise
+    that stdout is JSON on every nonzero exit.
+    """
+
+    def test_binary_codecs_fail_closed(self) -> None:
+        for codec in ("rot13", "base64", "hex", "bz2", "zlib", "quopri", "uu"):
+            with self.subTest(codec=codec):
+                with tempfile.TemporaryDirectory() as directory:
+                    target = Path(directory) / "server.py"
+                    target.write_bytes(f"# -*- coding: {codec} -*-\nx = 1\n".encode())
+                    project = parse_project(target)
+
+                self.assertTrue(
+                    project.diagnostics,
+                    f"{codec} produced no diagnostic instead of failing closed",
+                )
+
+    def test_binary_codec_exits_two_with_sarif_on_stdout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "server.py"
+            target.write_bytes(b"# -*- coding: rot13 -*-\nx = 1\n")
+            stdout = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                code = main(["audit", str(target), "--format", "sarif"])
+
+        self.assertEqual(code, 2)
+        self.assertTrue(stdout.getvalue().lstrip().startswith("{"))
+
+
 if __name__ == "__main__":
     unittest.main()

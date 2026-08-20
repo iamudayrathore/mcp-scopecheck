@@ -1,5 +1,15 @@
 # MCP ScopeCheck v0.2.3
 
+> **This version was never published.** A pre-release audit found the guard model
+> cleared genuine traversal through three mechanisms: a containment check whose
+> exception was swallowed by `try`/`except` or `contextlib.suppress` still counted,
+> and containment transferred to values derived by escaping out of the guarded path
+> (`t / ".." / "etc" / "passwd"`). Untracked stores also failed open when written as
+> a call (`d.__setitem__(k, p)`), and escape reporting failed audits of tools with
+> no filesystem capability at all. The claims "an unguarded join is still reported"
+> and "untrackable stores fail closed" below are both wrong. Superseded by
+> [v0.2.4](release-notes-v0.2.4.md). Retained for the record.
+
 Closes the path-taint gaps 0.2.2 left open, and the false positive 0.2.2
 introduced. **0.2.2 was never published.**
 

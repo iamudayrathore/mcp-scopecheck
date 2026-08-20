@@ -17,7 +17,7 @@ class PackageIdentityTests(unittest.TestCase):
             (REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )["project"]
 
-        self.assertEqual(metadata["version"], "0.2.3")
+        self.assertEqual(metadata["version"], "0.2.4")
         self.assertEqual(__version__, metadata["version"])
         self.assertEqual(metadata["dependencies"], [])
 
