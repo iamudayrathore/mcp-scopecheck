@@ -44,6 +44,17 @@ class ActionPolicyTests(unittest.TestCase):
             with self.subTest(command=command[:40]):
                 self.assertNotIn("${{", command)
 
+    def test_audit_step_clears_errexit_before_capturing_the_exit_status(self) -> None:
+        """GitHub runs composite bash steps as `bash -e`.
+
+        Without an explicit `set +e` the shell aborts on a nonzero audit before
+        `$?` is captured, so the action fails instead of reporting the exit code.
+        """
+
+        self.assertIn("set +e", self.text)
+        audit = self.text[self.text.index("id: audit") :]
+        self.assertLess(audit.index("set +e"), audit.index("scopecheck_exit=$?"))
+
     def test_exit_two_is_not_reported_as_a_clean_result(self) -> None:
         self.assertIn("partial or failed", self.text)
         self.assertIn("exit-code", self.text)

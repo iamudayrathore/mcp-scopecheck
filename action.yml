@@ -79,15 +79,18 @@ runs:
         SCOPECHECK_OUTPUT: ${{ inputs.output }}
         SCOPECHECK_TARGET: ${{ inputs.target }}
       run: |
-        set -uo pipefail
+        # GitHub runs composite bash steps as `bash -e`, so errexit must be
+        # cleared explicitly around the audit; otherwise the shell aborts on a
+        # nonzero audit before the exit status can be captured and reported.
+        set +e
         mcp-scopecheck audit "${SCOPECHECK_TARGET}" \
           --fail-on "${SCOPECHECK_FAIL_ON}" \
           --format "${SCOPECHECK_FORMAT}" > "${SCOPECHECK_OUTPUT}"
         scopecheck_exit=$?
+        set -e
         printf 'exit-code=%s\n' "${scopecheck_exit}" >> "${GITHUB_OUTPUT}"
         printf 'report=%s\n' "${SCOPECHECK_OUTPUT}" >> "${GITHUB_OUTPUT}"
         cat "${SCOPECHECK_OUTPUT}"
-        exit 0
 
     - name: Enforce the audit result
       if: ${{ inputs.fail-build == 'true' && steps.audit.outputs.exit-code != '0' }}
