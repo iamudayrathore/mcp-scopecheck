@@ -42,6 +42,41 @@ jobs:
           test "${unsafe_exit}" -eq 1
           PYTHONPATH=src python -m mcp_scopecheck audit examples/hardened_docs_server
 
+  action:
+    name: Composite action end to end
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Audit the hardened fixture with fail-build enabled
+        uses: ./
+        with:
+          target: examples/hardened_docs_server
+          output: hardened.sarif
+
+      - name: Audit the unsafe fixture without failing the build
+        id: unsafe
+        uses: ./
+        with:
+          target: examples/unsafe_docs_server
+          output: unsafe.sarif
+          fail-build: "false"
+
+      - name: Assert the unsafe fixture reported findings and valid SARIF
+        shell: bash
+        env:
+          UNSAFE_EXIT: ${{ steps.unsafe.outputs.exit-code }}
+        run: |
+          set -euo pipefail
+          test "${UNSAFE_EXIT}" = "1"
+          python -c "import json,sys; d=json.load(open('unsafe.sarif')); \
+            sys.exit(0 if d['version']=='2.1.0' and d['runs'][0]['results'] else 1)"
+          python -c "import json,sys; d=json.load(open('hardened.sarif')); \
+            sys.exit(0 if d['runs'][0]['results']==[] else 1)"
+
   quality:
     runs-on: ubuntu-latest
     steps:
