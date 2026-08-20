@@ -81,7 +81,7 @@ jobs:
           target: path/to/python/server
           fail-on: high
           version: "0.2.3"      # scanner version, independent of the pin above
-      - uses: github/codeql-action/upload-sarif@<pinned-sha>
+      - uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
         if: always()
         with:
           sarif_file: scopecheck.sarif
@@ -315,4 +315,4 @@ scripts/demo.sh
 
 ## License
 
-MIT
+MCP ScopeCheck is licensed under the [MIT License](LICENSE).
