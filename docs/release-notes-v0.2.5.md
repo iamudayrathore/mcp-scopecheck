@@ -93,18 +93,22 @@ passing. Read that as *nothing regressed in the shapes enumerated*, not as evide
 of correctness — six audits have now found defects in builds whose gate was green.
 
 What the number is worth depends on whether the gate can be satisfied without
-analyzing anything, so that is measured directly:
+analyzing anything, so that is measured directly against builds that do not:
 
 | Build under test | Score |
 | --- | ---: |
 | 0.2.5 | **164 pass, 0 fail** |
-| A regex fake that never calls `ast.parse` | 71 pass, **93 fail** |
-| A stub that only prints and exits `2` | 56 pass, **108 fail** |
+| A pattern-matcher that hashes the source text | 130 pass, **34 fail** |
+| A stub that only prints and exits | 55 pass, **109 fail** |
 
-Three integrity checks anchor the rest: the snapshot digest must be well-formed
-sha256, must differ between two different contracts, and must be identical across
-runs of the same one. A build that does not analyze can print any fixed line; it
-cannot produce digests that track the contract.
+Those figures describe the two fakes that were built, not a bound - a better fake
+may score higher. The check they are anchored on is narrow and specific: the
+contract digest must be **invariant** under edits that change the source bytes
+without changing the contract, while still differing when the contract differs. A
+digest computed over source text fails the first half immediately. An earlier
+version of these checks asserted only that a digest was well-formed, differed
+between fixtures, and was stable - all three of which `sha256(source)` satisfies
+with no analysis at all, and this document claimed otherwise.
 
 Unit suite: 170 tests.
 

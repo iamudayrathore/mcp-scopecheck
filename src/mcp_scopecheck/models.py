@@ -52,7 +52,7 @@ class UnresolvedReason(StrEnum):
     GRAPH_RESOURCE_BUDGET = "graph/resource budget"
     HIGHER_ORDER_CALL = "higher-order call"
     MISSING_LOCAL_TARGET = "missing local target"
-    UNRESOLVED_ARGUMENT_LINEAGE = "unresolved argument/guard lineage"
+    UNRESOLVED_ARGUMENT_LINEAGE = "unresolved argument lineage"
     UNRESOLVED_REEXPORT = "unresolved re-export"
     UNSUPPORTED_INSTANCE_DISPATCH = "unsupported instance/class dispatch"
     WILDCARD_IMPORT = "wildcard import"

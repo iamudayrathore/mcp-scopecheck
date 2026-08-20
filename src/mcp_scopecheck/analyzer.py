@@ -36,22 +36,6 @@ PATH_WRITE_METHODS = {
     "write_bytes",
     "write_text",
 }
-# Method names that exist on pathlib.Path and essentially nowhere else. Used to
-# decide whether a receiver the analyzer merely infers to be a path may be treated
-# as one; `open`, `touch`, `rename`, `chmod` and `unlink` are deliberately absent
-# because they are common on unrelated objects.
-PATHLIB_EXCLUSIVE_METHODS = frozenset(
-    {
-        "iterdir",
-        "read_bytes",
-        "read_text",
-        "rglob",
-        "with_suffix",
-        "write_bytes",
-        "write_text",
-    }
-)
-
 PATH_RETURNING_METHODS = {
     "absolute",
     "expanduser",
@@ -1400,13 +1384,14 @@ class _ExecutionVisitor(ast.NodeVisitor):
             return self._is_path_value(value.value, resolved_imports)
         if isinstance(value, ast.NamedExpr):
             return self._is_path_value(value.value, resolved_imports)
-        if isinstance(value, ast.Subscript):
-            # `paths["docs"].read_text()`. Only pathlib-exclusive method names
-            # qualify, checked by the caller: `touch`, `rename`, `open` and `chmod`
-            # are ordinary method names on caches, ORM rows and connection pools, and
-            # treating any subscript as a path made `ENTRIES[key].touch()` report a
-            # filesystem write the tool does not perform.
-            return True
+        # A container element is deliberately NOT a path. Whether `D[k]` holds one
+        # is not knowable here, and every attempt to have it both ways produced a
+        # verdict that changed with the spelling: treating it as a path invented
+        # filesystem writes on in-memory caches, and gating that on method names
+        # made `D[k].touch()` and `entry = D[k]; entry.touch()` disagree. A path
+        # retrieved from a container by subscript is not tracked; that is a bounded
+        # false negative, stated in docs/limitations.md, and it is preferred to an
+        # unbounded false positive on ordinary code.
         if not isinstance(value, ast.Call):
             return False
         if _qualified_name(value.func, resolved_imports) == "pathlib.Path":
@@ -1425,6 +1410,13 @@ class _ExecutionVisitor(ast.NodeVisitor):
         # invisible, so the tool reported `Observed: none` under a `complete` audit -
         # an affirmative denial of a capability it has. Fail closed instead: if any
         # argument is a path, the result may be one.
+        #
+        # `str()` is excluded because it is documented to return a string, and
+        # `str.replace` collides with `Path.replace`, which is a filesystem rename.
+        # Without this, `str(ROOT / name).replace("a", "b")` - ordinary string
+        # surgery - reported a filesystem write.
+        if _qualified_name(value.func, resolved_imports) == "str":
+            return False
         return any(
             self._is_path_value(argument, resolved_imports)
             for argument in value.args
@@ -1445,13 +1437,6 @@ class _ExecutionVisitor(ast.NodeVisitor):
         if not self._is_path_value(call.func.value, imports):
             return None
         method = call.func.attr
-        if self._is_speculative_path(call.func.value) and method not in PATHLIB_EXCLUSIVE_METHODS:
-            # The receiver is only *possibly* a path - an element out of a container,
-            # or the result of a call the analyzer cannot type. Ambiguous method
-            # names (`open`, `touch`, `rename`, `chmod`) are ordinary on caches, ORM
-            # rows and connection pools, so require a name that belongs to pathlib
-            # alone before asserting a filesystem capability the tool may not have.
-            return None
         symbol = _display_name(call.func, imports)
         if method in PATH_READ_METHODS:
             return symbol, Capability.FILESYSTEM_READ
@@ -1494,37 +1479,6 @@ class _ExecutionVisitor(ast.NodeVisitor):
             if _looks_like_path_expression(returned, callee):
                 return True
         return False
-
-    def _is_speculative_path(self, value: ast.AST) -> bool:
-        """Whether the receiver is only inferred to be a path, not proven one.
-
-        `Path(name)` is a proven path, not a guess. Treating every `ast.Call` as
-        speculative made a literal constructor less trusted than a dict subscript
-        and suppressed the capability for every sink method outside the
-        pathlib-exclusive set: `Path(name).unlink()` reported `Observed: none`
-        under a `complete` audit while `p = Path(name); p.unlink()` reported the
-        write. Identical code, different verdict decided by whether the author used
-        one line or two - the same property that led to withdrawing MSC103.
-
-        Only two things are genuinely unproven: an element taken out of a
-        container, and a call that merely *received* a path and might return one.
-        """
-
-        if isinstance(value, ast.Subscript):
-            return True
-        if not isinstance(value, ast.Call):
-            return False
-        imports = self._imports_for_value(value)
-        if _qualified_name(value.func, imports) in {"pathlib.Path", "os.fspath"}:
-            return False
-        if (
-            isinstance(value.func, ast.Attribute)
-            and value.func.attr in PATH_RETURNING_METHODS
-            and self._is_path_value(value.func.value, imports)
-        ):
-            return False
-        # A resolvable local callee returning a path expression is proven too.
-        return not self._returns_path(value)
 
     def _path_iterator(self, value: ast.AST) -> bool:
         return (
