@@ -1,14 +1,31 @@
-# MCP ScopeCheck
+<p align="center">
+  <img
+    src="https://github.com/user-attachments/assets/6c2c1df8-2c3d-4820-b68c-7a65d8d26943"
+    alt="MCP ScopeCheck logo"
+    width="560"
+  >
+</p>
 
-[![PyPI version](https://img.shields.io/pypi/v/mcp-scopecheck.svg)](https://pypi.org/project/mcp-scopecheck/)
-[![Python versions](https://img.shields.io/pypi/pyversions/mcp-scopecheck.svg)](https://pypi.org/project/mcp-scopecheck/)
-[![CI](https://github.com/iamudayrathore/mcp-scopecheck/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/iamudayrathore/mcp-scopecheck/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/iamudayrathore/mcp-scopecheck/blob/main/LICENSE)
+<p align="center">
+  <strong>Inspect before you connect.</strong>
+</p>
 
-<img width="2061" height="763" alt="mcpscopecheck" src="https://github.com/user-attachments/assets/6c2c1df8-2c3d-4820-b68c-7a65d8d26943" />
+<p align="center">
+  <a href="https://pypi.org/project/mcp-scopecheck/">
+    <img src="https://img.shields.io/pypi/v/mcp-scopecheck.svg" alt="PyPI version">
+  </a>
+  <a href="https://pypi.org/project/mcp-scopecheck/">
+    <img src="https://img.shields.io/pypi/pyversions/mcp-scopecheck.svg" alt="Python versions">
+  </a>
+  <a href="https://github.com/iamudayrathore/mcp-scopecheck/actions/workflows/ci.yml">
+    <img src="https://github.com/iamudayrathore/mcp-scopecheck/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI">
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT">
+  </a>
+</p>
 
-
-**Inspect before you connect.** MCP ScopeCheck is a pre-install static auditor that compares a Python MCP tool's declared contract with security-relevant behavior reachable from its source—without importing or running the server.
+MCP ScopeCheck is a pre-install static auditor that compares a Python MCP tool's declared contract with security-relevant behavior reachable from its source—without importing or running the server.
 
 ## Quick start
 
