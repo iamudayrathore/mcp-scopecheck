@@ -75,12 +75,16 @@ Restoring these rules requires path-aware dataflow that can express "this value 
 provably beneath this root" across control flow and derivation, rather than the
 token-set model that failed. That is a design change, not a patch.
 
-A path that reaches a filesystem call through a route the analyzer does not model
-is still reported as incompleteness rather than omitted, so `Observed: none` is not
-produced for a tool that does touch the filesystem. A receiver the analyzer only
-infers to be a path must use a pathlib-exclusive method before a capability is
+Capability detection is itself bounded, and `Observed: none` means "none that were
+modeled", not "none". A path reaching a filesystem call through a route outside the
+model - a class method, a module-level singleton, a callback the analyzer cannot
+follow - may not be reported at all. Do not read `Observed: none` as a guarantee.
+
+A receiver the analyzer only *infers* to be a path, such as an element taken out of
+a container, must be used with a pathlib-exclusive method before a capability is
 asserted, so an in-memory cache calling `.touch()` is not reported as a filesystem
-write.
+write. A container holding objects that expose `read_text`/`write_text` will still
+be reported as filesystem access; that is a known false positive.
 
 `MSC001` matches deterministic wording families, and those families differ in
 precision. Unambiguous directive families are Critical. The `credential-handling
