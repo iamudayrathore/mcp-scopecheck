@@ -108,7 +108,7 @@ jobs:
 ```
 
 **Pin every action by full commit SHA, including this one.** Branch refs are
-mutable, and git tags are mutable too - a tag can be moved to point at different
+mutable, and git tags are mutable too—a tag can be moved to point at different
 code, which is how the `tj-actions/changed-files` compromise reached thousands of
 workflows in March 2025. A 40-character SHA is content-addressed and cannot be
 repointed. ScopeCheck enforces the same rule on itself: a test fails the build if
@@ -116,13 +116,13 @@ any action used by this repository's workflows or by this action is pinned by
 anything other than a full SHA.
 
 Release tags in this repository are additionally protected against updates and
-deletions, but pin the SHA regardless - do not extend trust to a tag in any
+deletions, but pin the SHA regardless—do not extend trust to a tag in any
 repository whose protection you have not verified.
 
 The pinned SHA selects the **action code**; the `version` input selects the
 **scanner**. Keep them separate. A commit's `action.yml` carries whatever scanner
 version was current when it was written, so relying on that default silently ties
-you to an older scanner every time you pin an older commit - which, for a security
+you to an older scanner every time you pin an older commit—which, for a security
 tool, means running one with known-missed detections. Setting `version` explicitly
 makes the scanner you run visible in your own workflow file and reviewable in your
 own diffs.
@@ -156,7 +156,7 @@ characters. Target modules are never imported, decorators are never invoked,
 and MCP servers are never started. A regression test places a real top-level
 side effect in a fixture and proves it does not execute during an audit.
 
-## What v0.2 detects
+## What ScopeCheck detects
 
 | Rule | Severity | What it means |
 | --- | --- | --- |
@@ -172,7 +172,7 @@ side effect in a fixture and proves it does not execute during an audit.
 
 `MSC103` and `MSC104` are **withdrawn as of 0.2.2.** They attempted to decide
 whether caller-controlled filesystem access was constrained, and across four
-consecutive release candidates they got that wrong in alternating directions — the
+consecutive release candidates they got that wrong in alternating directions—the
 last of them still deciding the outcome by whether a parameter happened to be named
 `path` rather than `title`.
 
@@ -190,14 +190,17 @@ Observed capabilities are reported separately from findings. Filesystem reads ar
 
 ## The 5-S report
 
-Every audit is organized around:
+Every audit reports five evidence areas:
 
 - **Source** — what local source was inspected.
 - **Surface** — which MCP tools were discovered.
 - **Scope** — parameters and declared annotations.
 - **Side effects** — filesystem, environment, network, process, and dynamic-code capabilities reachable from each tool.
-- **Completeness** — supported registrations and resolved or unresolved reachable local call edges.
 - **Snapshot** — a deterministic SHA-256 digest of the extracted contract and capabilities.
+
+Analysis completeness is reported alongside them:
+
+- **Completeness** — supported registrations and resolved or unresolved reachable local call edges.
 
 For a broader manual review, use the [5-S pre-install checklist](docs/review-checklist.md).
 
@@ -264,7 +267,7 @@ an external package do not by themselves make an audit partial.
 Its families are pattern-based and are not equally precise. The
 `credential-handling instruction` and `cross-call instruction` families match a
 verb near a credential noun and sequencing wording respectively, both of which
-also appear in accurate self-descriptions - a secrets manager that says it "reads
+also appear in accurate self-descriptions—a secrets manager that says it "reads
 credentials from the configured keychain", or a tool documenting a prerequisite
 "before any request". Those families report **High** so they read as evidence for
 a human decision rather than as proof of poisoning. The `concealment instruction`
@@ -289,7 +292,7 @@ Audits fail with exit `2` when fixed safety limits are exceeded:
 1 MB per file, 5,000 Python files, 20 MB total source, 500,000 AST nodes, 200 AST
 levels, 100 retained diagnostics, 2,000 participating local modules, 20,000
 resolved local edges, 256 reachable functions per tool, 32 cross-module hops per
-tool, 1,000 capability paths per tool, 1,000 unresolved edges, or 1,000 potential
+tool, 1,000 capability paths per tool, 1,000 unresolved edges, 1,000 potential
 registrations, or 250,000 binding-state work entries per module or reachable
 function. A symlink supplied as the target is rejected;
 symlinked files and directories encountered inside a directory target are
