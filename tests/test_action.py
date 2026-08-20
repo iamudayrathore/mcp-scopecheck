@@ -55,6 +55,22 @@ class ActionPolicyTests(unittest.TestCase):
         audit = self.text[self.text.index("id: audit") :]
         self.assertLess(audit.index("set +e"), audit.index("scopecheck_exit=$?"))
 
+    def test_readme_pins_this_action_by_full_commit_sha(self) -> None:
+        """The published usage example must not teach a mutable ref.
+
+        Branch refs and git tags are both movable, so a consumer who pins either
+        one executes whatever the ref points at on their next run. ScopeCheck
+        enforces full-SHA pinning on its own workflows and must not document a
+        weaker pattern for its users.
+        """
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        references = re.findall(r"uses:\s*iamudayrathore/mcp-scopecheck@(\S+)", readme)
+        self.assertTrue(references, "README must document the action")
+        for reference in references:
+            with self.subTest(reference=reference):
+                self.assertRegex(reference, r"^[0-9a-f]{40}$")
+
     def test_exit_two_is_not_reported_as_a_clean_result(self) -> None:
         self.assertIn("partial or failed", self.text)
         self.assertIn("exit-code", self.text)
