@@ -79,6 +79,11 @@ That is a false positive, and it is preferred over the alternative: a guard mode
 that spreads optimistically reported real traversal as clean in 0.2.1, 0.2.2, and
 0.2.3 by three different mechanisms.
 
+A path that reaches a filesystem call through a route the analyzer does not model
+- returned from a local helper, taken out of a container, handed to a callback -
+is reported as incompleteness rather than silently omitted. Releases before 0.2.4
+reported `Observed: none` for such tools, denying a capability they have.
+
 Lambda bodies are not visited, and a tool whose only capability is inside a lambda
 is currently reported as `complete` rather than `partial`. A module-level instance
 of a same-file class (`_runner = Runner()` then `_runner.run(x)`) is likewise not

@@ -1040,6 +1040,18 @@ def analyze_reachability(
                     UnresolvedReason.HIGHER_ORDER_CALL,
                     node.func.id,
                 )
+            elif _callback_arguments(project, record, node):
+                # A project-local function handed to a call the analyzer cannot
+                # follow - `pool.submit(_worker, path)`, `sorted(items, key=_pick)`.
+                # Whatever that callee does runs, but nothing here proves when. It
+                # previously vanished with an empty ledger and a `complete` audit,
+                # which denies a capability the tool has.
+                add_unresolved(
+                    record,
+                    node,
+                    UnresolvedReason.HIGHER_ORDER_CALL,
+                    ", ".join(_callback_arguments(project, record, node)),
+                )
             elif (
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
@@ -1085,6 +1097,27 @@ def analyze_reachability(
         ),
     )[:MAX_UNRESOLVED_LOCAL_EDGES]
     return resolved_values, unresolved_values, budget_exceeded
+
+
+def _callback_arguments(
+    project: ParsedProject,
+    record: FunctionRecord,
+    call: ast.Call,
+) -> list[str]:
+    """Names of project-local functions passed as arguments to `call`.
+
+    Passing a function is not calling it, so no call edge is created, and the callee
+    is never analyzed. Reporting nothing at all would state that a tool reading files
+    inside its callback has no reachable capability.
+    """
+
+    names = []
+    for argument in [*call.args, *[keyword.value for keyword in call.keywords]]:
+        if not isinstance(argument, ast.Name):
+            continue
+        if (record.source_file, argument.id) in project.functions:
+            names.append(argument.id)
+    return names
 
 
 def _mode_capability(call: ast.Call, positional_index: int) -> Capability:
@@ -1337,14 +1370,35 @@ class _ExecutionVisitor(ast.NodeVisitor):
             return self._is_path_value(value.left, resolved_imports)
         if isinstance(value, ast.Attribute) and value.attr == "parent":
             return self._is_path_value(value.value, resolved_imports)
+        if isinstance(value, ast.Subscript):
+            # `paths["docs"].read_text()`. The method names this feeds are
+            # pathlib-specific, so an element taken out of a container and used as a
+            # path is one. Treating it as unknown erased the capability entirely.
+            return True
         if not isinstance(value, ast.Call):
             return False
         if _qualified_name(value.func, resolved_imports) == "pathlib.Path":
             return True
-        return (
+        if (
             isinstance(value.func, ast.Attribute)
             and value.func.attr in PATH_RETURNING_METHODS
             and self._is_path_value(value.func.value, resolved_imports)
+        ):
+            return True
+        # A call that receives a path and returns something unmodeled may well
+        # return that path: `_pick(Path(name)).write_text(body)` is an arbitrary
+        # caller-controlled write. Treating the result as not-a-path made the sink
+        # invisible, so the tool reported `Observed: none` under a `complete` audit -
+        # an affirmative denial of a capability it has. Fail closed instead: if any
+        # argument is a path, the result may be one.
+        return any(
+            self._is_path_value(argument, resolved_imports)
+            for argument in value.args
+            if not isinstance(argument, ast.Starred)
+        ) or any(
+            self._is_path_value(keyword.value, resolved_imports)
+            for keyword in value.keywords
+            if keyword.arg is not None
         )
 
     def _path_call(
@@ -1901,7 +1955,22 @@ CONTAINER_MUTATORS = {
 # the derived value is unguarded again. Releases before 0.2.4 inherited the guard
 # through any derivation whose inputs were guarded, so a path built by escaping out
 # of a guarded value (`t / ".." / ".." / "etc" / "passwd"`) was reported clean.
-CONTAINMENT_PRESERVING_METHODS = frozenset({"absolute", "resolve"})
+CONTAINMENT_PRESERVING_METHODS = frozenset(
+    {
+        "absolute",
+        "resolve",
+        # A child of a contained directory is contained, and swapping the suffix of
+        # a contained file keeps it in the same directory. `with_name` is excluded:
+        # it takes a caller-supplied name that can contain separators. Without
+        # these, the ordinary shapes MSC103's own remediation text recommends -
+        # validate a directory then iterate it, validate a file then write beside it
+        # - were reported as unconstrained.
+        "glob",
+        "iterdir",
+        "rglob",
+        "with_suffix",
+    }
+)
 CONTAINMENT_PRESERVING_CALLS = frozenset(
     {
         "os.fspath",
@@ -1911,6 +1980,12 @@ CONTAINMENT_PRESERVING_CALLS = frozenset(
         "pathlib.Path",
         "str",
     }
+)
+
+# Of the preserving methods, these take an argument that cannot leave the root: a
+# glob pattern is matched beneath the receiver, and a suffix replaces the extension.
+CONTAINMENT_PRESERVING_WITH_ARGUMENTS = frozenset(
+    {"glob", "rglob", "with_suffix"}
 )
 
 PATH_TRANSFORM_CALLS = {
@@ -2102,7 +2177,12 @@ class _PathFlowVisitor(ast.NodeVisitor):
         if isinstance(node, ast.FormattedValue):
             return self._value(node.value)
         if isinstance(node, ast.Attribute) and node.attr == "parent":
-            return self._derived(node, [self._value(node.value)])
+            # `target.parent.mkdir(...)` after proving `target` is contained is the
+            # ordinary write-a-note shape. The parent of a contained path is at or
+            # above the validated file but still inside the tree that was checked.
+            return self._derived(
+                node, [self._value(node.value)], preserves_containment=True
+            )
         # Percent formatting is ordinary path construction: "%s/%s" % (root, name).
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
             return self._derived(node, [self._value(node.left), self._value(node.right)])
@@ -2182,8 +2262,10 @@ class _PathFlowVisitor(ast.NodeVisitor):
                 ],
                 preserves_containment=(
                     node.func.attr in CONTAINMENT_PRESERVING_METHODS
-                    and not node.args
-                    and not node.keywords
+                    and (
+                        node.func.attr in CONTAINMENT_PRESERVING_WITH_ARGUMENTS
+                        or not (node.args or node.keywords)
+                    )
                 ),
             )
         return self._unmodeled(node)
@@ -2429,6 +2511,13 @@ class _PathFlowVisitor(ast.NodeVisitor):
             self.discarded_calls.add(id(node.value))
         self.generic_visit(node)
 
+    def visit_Assert(self, node: ast.Assert) -> None:
+        # Assertions are stripped under `python -O`, so a containment check written
+        # as one may never run. Visit for taint but discard anything it proves.
+        guarded_before = set(self.guarded)
+        self.generic_visit(node)
+        self.guarded = guarded_before
+
     def visit_Call(self, node: ast.Call) -> None:
         self.generic_visit(node)
         self._record_expansion(node)
@@ -2473,7 +2562,22 @@ class _PathFlowVisitor(ast.NodeVisitor):
                 self.bindings[receiver.id] = value
             return
 
-        if id(node) not in self.discarded_calls:
+        # Two shapes count as putting the value somewhere unmodeled:
+        #   * a call made for its effect - the result is discarded; and
+        #   * a method invoked on a local object, whatever happens to the result.
+        # The second matters because `fut = pool.submit(worker, path)` and
+        # `x = d.__setitem__(k, path)` store the value exactly as their discarded
+        # spellings do, and binding the result is the realistic form. Method calls on
+        # the tainted value itself (`name.upper()`) and on imported modules
+        # (`logging.info(name)`) are excluded: the first is a transform already
+        # tracked by `_value`, the second is not a container store.
+        stores_on_object = False
+        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+            receiver_name = node.func.value.id
+            receiver_value = self._value(node.func.value)
+            module_alias = self.execution.imports_for(node).get(receiver_name)
+            stores_on_object = not receiver_value.sources and not module_alias
+        if id(node) not in self.discarded_calls and not stores_on_object:
             return
         if self.execution.call_edges_by_call.get(id(node)) is not None:
             # A resolved local call already receives the value as a bound parameter
@@ -2613,6 +2717,21 @@ class _PathFlowVisitor(ast.NodeVisitor):
     def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
         self._visit_for(node.iter, node.target, node.body, node.orelse)
 
+    def visit_While(self, node: ast.While) -> None:
+        # A while body may run zero times, so nothing it establishes is guaranteed.
+        # Without this the default traversal walked the body in place and kept its
+        # guards unconditionally, so a containment check inside a loop that never
+        # runs cleared the sink. Every other construct already merges against the
+        # not-taken path; this was the one that did not.
+        self.visit(node.test)
+        before = self._state()
+        for statement in node.body:
+            self.visit(statement)
+        body_state = self._state()
+        self._merge_states(before, body_state)
+        for statement in node.orelse:
+            self.visit(statement)
+
     @staticmethod
     def _terminates(statements: list[ast.stmt]) -> bool:
         return bool(statements) and isinstance(statements[-1], (ast.Raise, ast.Return))
@@ -2687,8 +2806,22 @@ class _PathFlowVisitor(ast.NodeVisitor):
             self._restore(merged)
         else:
             self._restore(before)
+        if self._transfers_control(finalbody):
+            # `finally: return ...` discards an exception still in flight, so a
+            # check in the body that raised is swallowed exactly as an `except:
+            # pass` would swallow it. Drop what the body proved.
+            self.guarded = set(before.guarded)
         for statement in finalbody:
             self.visit(statement)
+
+    @staticmethod
+    def _transfers_control(statements: list[ast.stmt]) -> bool:
+        """Whether these statements can leave the block, discarding an exception."""
+
+        return any(
+            isinstance(statement, (ast.Return, ast.Break, ast.Continue))
+            for statement in statements
+        )
 
     def visit_Try(self, node: ast.Try) -> None:
         self._visit_try(node.body, node.handlers, node.orelse, node.finalbody)
