@@ -2,6 +2,8 @@
 
 Correctness release for tool identity, control-flow bindings, and local-call
 classification. Upgrading is recommended before relying on a clean v0.2 audit.
+This is the first PyPI release to include the changes documented for the tagged but
+unpublished v0.2.2 release.
 
 ## What changed
 

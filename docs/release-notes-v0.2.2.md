@@ -1,5 +1,8 @@
 # MCP ScopeCheck v0.2.2
 
+> **Publication note:** v0.2.2 was tagged in GitHub but was not published to
+> PyPI. Its changes first became installable from PyPI in v0.2.3.
+
 Withdraws `MSC103` and `MSC104`, and fixes a crash on crafted source encodings.
 
 **If you are on 0.2.1, upgrading changes what this tool claims.** Read the first
