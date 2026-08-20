@@ -334,5 +334,121 @@ class GuardSurvivalTests(unittest.TestCase):
         self.assertIn("MSC103", _rules(report))
 
 
+class DefeatedGuardTests(unittest.TestCase):
+    """A containment check that cannot constrain the sink must not clear it.
+
+    Containment is a proven fact about a value, not a mark that spreads. Releases
+    before 0.2.4 set a guard whenever a `relative_to` call appeared and carried it
+    through any derivation, so a swallowed exception or a path built by escaping out
+    of the guarded value produced a clean audit on real traversal.
+    """
+
+    def test_swallowed_exception_does_not_establish_a_guard(self) -> None:
+        for label, handler in (
+            ("pass", "        pass"),
+            ("bare_except", "        _ = 1"),
+        ):
+            with self.subTest(handler=label):
+                report = _audit(
+                    "    try:\n"
+                    "        t = ROOT / name\n"
+                    "        t.relative_to(ROOT)\n"
+                    "    except ValueError:\n"
+                    f"{handler}\n"
+                    "    t.read_text()"
+                )
+                self.assertIn("MSC103", _rules(report))
+
+    def test_contextlib_suppress_does_not_establish_a_guard(self) -> None:
+        report = _audit(
+            "    import contextlib\n"
+            "    t = ROOT / name\n"
+            "    with contextlib.suppress(ValueError):\n"
+            "        t.relative_to(ROOT)\n"
+            "    t.read_text()"
+        )
+        self.assertIn("MSC103", _rules(report))
+
+    def test_containment_does_not_survive_added_components(self) -> None:
+        """Proving `t` is contained proves nothing about `t / x`."""
+
+        for label, sink in (
+            ("parent_escape", '    (t / ".." / ".." / "etc" / "passwd").read_text()'),
+            ("joinpath", '    t.joinpath("..", "etc").read_text()'),
+            ("expanduser", "    t.expanduser().read_text()"),
+        ):
+            with self.subTest(derivation=label):
+                report = _audit(
+                    "    t = ROOT / name\n"
+                    "    t.resolve().relative_to(ROOT)\n"
+                    f"{sink}"
+                )
+                self.assertIn("MSC103", _rules(report))
+
+    def test_containment_survives_pure_normalization(self) -> None:
+        report = _audit(
+            "    t = ROOT / name\n"
+            "    t.resolve().relative_to(ROOT)\n"
+            "    t.resolve().read_text()"
+        )
+        self.assertNotIn("MSC103", _rules(report))
+
+    def test_untainted_fallback_still_preserves_the_guard(self) -> None:
+        """The canonical idiom must not regress while fixing the swallowed case."""
+
+        report = _audit(
+            "    try:\n"
+            '        t = ROOT / "sections" / (name + ".md")\n'
+            "        t.resolve().relative_to(ROOT.resolve())\n"
+            "    except ValueError:\n"
+            '        t = ROOT / "index.md"\n'
+            "    t.read_text()"
+        )
+        self.assertNotIn("MSC103", _rules(report))
+
+
+class UntrackedStoreSpellingTests(unittest.TestCase):
+    """`d[k] = p` and `d.__setitem__(k, p)` are the same store, reported the same."""
+
+    STORES = {
+        "subscript": '    r = {}\n    r["t"] = name\n    open(r["t"]).read()',
+        "dunder": '    r = {}\n    r.__setitem__("t", name)\n    open(r["t"]).read()',
+        "operator": (
+            "    import operator\n    r = {}\n"
+            '    operator.setitem(r, "t", name)\n    open(r["t"]).read()'
+        ),
+        "heappush": (
+            "    import heapq\n    q = []\n"
+            "    heapq.heappush(q, name)\n    open(q[0]).read()"
+        ),
+        "appendleft": (
+            "    import collections\n    q = collections.deque()\n"
+            "    q.appendleft(name)\n    open(q[0]).read()"
+        ),
+    }
+
+    def test_no_spelling_of_an_untracked_store_reads_clean(self) -> None:
+        for label, body in self.STORES.items():
+            with self.subTest(store=label):
+                report = _audit(body)
+                self.assertNotEqual(
+                    report.completeness.status,
+                    AnalysisStatus.COMPLETE,
+                    f"{label} produced a clean audit",
+                )
+
+    def test_stores_without_filesystem_involvement_are_not_reported(self) -> None:
+        """Putting a parameter in a dict is ordinary code, not a filesystem concern."""
+
+        report = _audit(
+            "    envelope = {}\n"
+            '    envelope["message"] = name\n'
+            '    envelope["length"] = len(name)\n'
+            "    return envelope"
+        )
+        self.assertEqual(report.completeness.status, AnalysisStatus.COMPLETE)
+        self.assertEqual(_rules(report), set())
+
+
 if __name__ == "__main__":
     unittest.main()

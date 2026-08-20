@@ -248,7 +248,9 @@ naming and therefore missed traversals through parameters such as `filepath`,
 the sink. Recognized forms are a successful `Path.relative_to(fixed_root)` call,
 a checked `Path.is_relative_to(fixed_root)` branch whose rejecting path
 terminates, and an equality check between `os.path.commonpath(...)` and an
-untainted root. Branch joins retain a guard only when every continuing path does.
+untainted root. Containment is dropped by any derivation that adds a path component or changes the
+root, and by a check whose exception is swallowed by an enclosing handler or by
+`contextlib.suppress`.
 Calling a guard-like method on an unrelated value or merely normalizing with
 `resolve()` does not constrain a sink. This remains static evidence: it does not
 prove symlink safety, eliminate time-of-check/time-of-use races, or model dynamic
@@ -260,9 +262,13 @@ Path values propagate through concatenation, `/`, f-strings, `%` formatting,
 peers), `os.path.join`, `os.sep.join`, `posixpath.join`, `urllib.parse.unquote`,
 subscripting and slicing, conditional expressions, walrus bindings, container
 literals, starred arguments, augmented assignment, and tuple unpacking. At a
-control-flow join taint unions and guards intersect: a value tainted on any
-reachable branch is tainted afterwards, while a guard survives only when every
-joined branch established it. Any other expression form yields an *unproven*
+control-flow join taint unions, and containment survives only where it is proven on
+every path that carries the tainted value. A branch that rebinds the name to an
+untainted value contributes no tainted lineage and does not dissolve the other
+branch's proof; a branch that leaves the tainted binding in place without proving
+containment does. An exception handler is entered from any point in its `try` body,
+including from the containment check itself, so it starts without the proofs that
+body established. Any other expression form yields an *unproven*
 value - it still taints, so the sink is not lost, but `MSC103` is withheld and the
 sink is reported through the completeness ledger instead, because the rule asserts
 an unguarded path and that assertion cannot be made about unfollowed lineage.

@@ -82,7 +82,7 @@ jobs:
         with:
           target: path/to/python/server
           fail-on: high
-          version: "0.2.3"      # scanner version, independent of the pin above
+          version: "0.2.4"      # scanner version, independent of the pin above
       - uses: github/codeql-action/upload-sarif@<pinned-sha>
         if: always()
         with:
@@ -238,7 +238,13 @@ ordinary path construction - concatenation, f-strings, `%`, `.format`, `.join`,
 `os.path.join`, `.strip`/`.replace`/`.removeprefix` and the rest of the string
 family, indexing, ternaries, tuple unpacking, augmented assignment, and
 control-flow joins. A value tainted on any reachable branch is tainted after the
-join; a guard holds only when every joined branch established it. Lineage running
+join. Containment is a proven fact about a value rather than a mark that spreads:
+it is established only by a check whose failure cannot be swallowed, survives only
+pure normalization and rebinding, and is dropped by anything that adds a path
+component or changes the root - so proving `t` is contained proves nothing about
+`t / x` or `t.expanduser()`. A check inside a `try` whose handler continues, or
+inside `contextlib.suppress`, establishes nothing, because that is exactly the path
+taken when the check fails. Lineage running
 through an expression form outside that model does **not** silently clear: the
 sink is reported in the completeness ledger as `MSC103-LINEAGE-UNPROVEN`, the
 audit becomes partial, and the exit status is `2`. `.resolve()` alone is only

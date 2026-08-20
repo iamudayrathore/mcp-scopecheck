@@ -15,6 +15,7 @@ include docs/release-notes-v0.2.0.md
 include docs/release-notes-v0.2.1.md
 include docs/release-notes-v0.2.2.md
 include docs/release-notes-v0.2.3.md
+include docs/release-notes-v0.2.4.md
 include docs/sarif.md
 recursive-include examples *.py
 include scripts/preflight.sh

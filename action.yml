@@ -30,7 +30,7 @@ inputs:
       Exact mcp-scopecheck version to install. Pin this deliberately; the default
       tracks the release this action shipped with.
     required: false
-    default: "0.2.3"
+    default: "0.2.4"
   package:
     description: >-
       Alternative pip requirement to install instead of the pinned PyPI release,

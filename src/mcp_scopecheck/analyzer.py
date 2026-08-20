@@ -1894,6 +1894,25 @@ CONTAINER_MUTATORS = {
     "update",
 }
 
+# Containment is a proven fact about a value, not a mark that spreads. These are the
+# only derivations that carry the proof forward, because they denote the same file
+# beneath the same root. Everything else - adding a component, expanding a home
+# directory, rewriting the string - can leave the root, so the proof is dropped and
+# the derived value is unguarded again. Releases before 0.2.4 inherited the guard
+# through any derivation whose inputs were guarded, so a path built by escaping out
+# of a guarded value (`t / ".." / ".." / "etc" / "passwd"`) was reported clean.
+CONTAINMENT_PRESERVING_METHODS = frozenset({"absolute", "resolve"})
+CONTAINMENT_PRESERVING_CALLS = frozenset(
+    {
+        "os.fspath",
+        "os.path.abspath",
+        "os.path.normpath",
+        "os.path.realpath",
+        "pathlib.Path",
+        "str",
+    }
+)
+
 PATH_TRANSFORM_CALLS = {
     "os.fspath",
     "os.path.abspath",
@@ -1936,6 +1955,8 @@ class _PathFlowVisitor(ast.NodeVisitor):
         # Names this function rebinds at module or enclosing scope. Assignments to
         # them leave the function-local model the analyzer tracks.
         self.escaping_scopes: set[str] = set()
+        # Calls whose return value is discarded; see `_record_mutation`.
+        self.discarded_calls: set[int] = set()
 
     def visit_Global(self, node: ast.Global) -> None:
         self.escaping_scopes.update(node.names)
@@ -2013,14 +2034,27 @@ class _PathFlowVisitor(ast.NodeVisitor):
         self.bindings = merged
         self.guarded = guarded
 
-    def _derived(self, node: ast.AST, values: Iterable[_PathValue]) -> _PathValue:
+    def _derived(
+        self,
+        node: ast.AST,
+        values: Iterable[_PathValue],
+        *,
+        preserves_containment: bool = False,
+    ) -> _PathValue:
+        """Derive a new value, carrying containment only when it provably survives.
+
+        The default is False - fail closed. A derivation that adds a path component
+        or changes the root produces an unguarded value even when every input was
+        guarded, because containment of `t` says nothing about `t / x`.
+        """
+
         items = list(values)
         sources = frozenset(source for value in items for source in value.sources)
         if not sources:
             return _PathValue()
         token = id(node)
         original_tokens = {item for value in items for item in value.tokens}
-        if original_tokens and original_tokens <= self.guarded:
+        if preserves_containment and original_tokens and original_tokens <= self.guarded:
             self.guarded.add(token)
         return _PathValue(
             sources,
@@ -2074,23 +2108,42 @@ class _PathFlowVisitor(ast.NodeVisitor):
             return self._derived(node, [self._value(node.left), self._value(node.right)])
         # Indexing, slicing, and conditional selection all preserve the value.
         if isinstance(node, ast.Subscript):
-            return self._derived(node, [self._value(node.value), self._value(node.slice)])
+            return self._derived(
+                node,
+                [self._value(node.value), self._value(node.slice)],
+                preserves_containment=True,
+            )
         if isinstance(node, ast.IfExp):
-            return self._derived(node, [self._value(node.body), self._value(node.orelse)])
+            return self._derived(
+                node,
+                [self._value(node.body), self._value(node.orelse)],
+                preserves_containment=True,
+            )
         if isinstance(node, ast.Starred):
-            return self._derived(node, [self._value(node.value)])
+            return self._derived(
+                node, [self._value(node.value)], preserves_containment=True
+            )
         if isinstance(node, ast.Await):
-            return self._derived(node, [self._value(node.value)])
+            return self._derived(
+                node, [self._value(node.value)], preserves_containment=True
+            )
         # A container is path-like when any element is: "/".join([root, name]).
         if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
-            return self._derived(node, [self._value(item) for item in node.elts])
+            return self._derived(
+                node,
+                [self._value(item) for item in node.elts],
+                preserves_containment=True,
+            )
         if isinstance(node, ast.Dict):
             return self._derived(
                 node,
                 [self._value(value) for value in node.values if value is not None],
+                preserves_containment=True,
             )
         if isinstance(node, ast.NamedExpr):
-            return self._derived(node, [self._value(node.value)])
+            return self._derived(
+                node, [self._value(node.value)], preserves_containment=True
+            )
         if isinstance(node, ast.Constant):
             return _PathValue()
         if not isinstance(node, ast.Call):
@@ -2105,7 +2158,11 @@ class _PathFlowVisitor(ast.NodeVisitor):
                 proven=all(value.proven for value in values),
             )
         if name in PATH_TRANSFORM_CALLS:
-            return self._derived(node, [self._value(argument) for argument in node.args])
+            return self._derived(
+                node,
+                [self._value(argument) for argument in node.args],
+                preserves_containment=name in CONTAINMENT_PRESERVING_CALLS,
+            )
         if name in STRING_DERIVING_CALLS:
             return self._derived(node, [self._value(argument) for argument in node.args])
         if isinstance(node.func, ast.Attribute) and node.func.attr in {
@@ -2123,6 +2180,11 @@ class _PathFlowVisitor(ast.NodeVisitor):
                     *[self._value(argument) for argument in node.args],
                     *[self._value(keyword.value) for keyword in node.keywords],
                 ],
+                preserves_containment=(
+                    node.func.attr in CONTAINMENT_PRESERVING_METHODS
+                    and not node.args
+                    and not node.keywords
+                ),
             )
         return self._unmodeled(node)
 
@@ -2360,6 +2422,13 @@ class _PathFlowVisitor(ast.NodeVisitor):
         )
         self.guarded.update(visitor.scan())
 
+    def visit_Expr(self, node: ast.Expr) -> None:
+        # A call whose value is thrown away is being run for its effect, which for a
+        # call receiving tool input means storing or transmitting it.
+        if isinstance(node.value, ast.Call):
+            self.discarded_calls.add(id(node.value))
+        self.generic_visit(node)
+
     def visit_Call(self, node: ast.Call) -> None:
         self.generic_visit(node)
         self._record_expansion(node)
@@ -2370,24 +2439,54 @@ class _PathFlowVisitor(ast.NodeVisitor):
         self._follow_call(node)
 
     def _record_mutation(self, node: ast.Call) -> None:
-        """`queue.append(path)` puts tool input inside `queue`; taint the receiver.
+        """Track tool input handed to a call that stores it somewhere.
 
-        Without this the value was dropped at the call and a later `queue[0]`
-        reaching a filesystem call produced a clean audit.
+        `queue.append(path)` puts the input inside `queue`, so `queue` inherits the
+        taint and a later `queue[0]` reaching a filesystem call is reported.
+
+        Any other call that receives tool input and whose result is discarded is
+        storing it somewhere the analyzer does not model - `heapq.heappush(q, p)`,
+        `d.__setitem__(k, p)`, `operator.setitem(d, k, p)`, `deque.appendleft(p)`.
+        Allowlisting method names cannot keep up with those, so anything unmodeled
+        records an escape instead of silently dropping the value. Before 0.2.4 those
+        spellings produced a `complete` audit with no findings while `d[k] = p`
+        correctly degraded - the same store, reported two different ways.
         """
 
-        if not isinstance(node.func, ast.Attribute):
+        arguments = [self._value(argument) for argument in node.args]
+        arguments.extend(self._value(keyword.value) for keyword in node.keywords)
+        if not any(value.sources for value in arguments):
             return
-        if node.func.attr not in CONTAINER_MUTATORS:
+
+        receiver = node.func.value if isinstance(node.func, ast.Attribute) else None
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr in CONTAINER_MUTATORS
+            and isinstance(receiver, ast.Name)
+        ):
+            value = self._derived(
+                node,
+                [self._value(receiver), *arguments],
+                preserves_containment=False,
+            )
+            if value.sources:
+                self.bindings[receiver.id] = value
             return
-        receiver = node.func.value
-        if not isinstance(receiver, ast.Name):
+
+        if id(node) not in self.discarded_calls:
             return
-        contributed = [self._value(argument) for argument in node.args]
-        contributed.extend(self._value(keyword.value) for keyword in node.keywords)
-        value = self._derived(node, [self._value(receiver), *contributed])
-        if value.sources:
-            self.bindings[receiver.id] = value
+        if self.execution.call_edges_by_call.get(id(node)) is not None:
+            # A resolved local call already receives the value as a bound parameter
+            # and is followed, so nothing is lost.
+            return
+        imports = self.execution.imports_for(node)
+        if id(node) in self.execution.path_filesystem_calls or _call_capability(
+            node, _qualified_name(node.func, imports), imports
+        ) is not None:
+            # A modeled sink is reported by its own rule, not as lost lineage.
+            return
+        tainted = next(value for value in arguments if value.sources)
+        self._record_escape(node, tainted)
 
     def visit_Assign(self, node: ast.Assign) -> None:
         self.visit(node.value)
@@ -2451,13 +2550,36 @@ class _PathFlowVisitor(ast.NodeVisitor):
         self._restore(outer)
         self.bindings.pop(node.name, None)
 
+    def _suppresses_exceptions(self, item: ast.withitem) -> bool:
+        """Whether this context manager swallows the exception a guard relies on.
+
+        `contextlib.suppress(ValueError)` around a containment check leaves the value
+        unchecked exactly when the check fails, so nothing inside may establish a
+        guard. Detected structurally rather than by exception class, because
+        suppressing anything broad enough to catch the check is enough to defeat it.
+        """
+
+        expression = item.context_expr
+        if not isinstance(expression, ast.Call):
+            return False
+        imports = self.execution.imports_for(expression)
+        return _qualified_name(expression.func, imports) in {
+            "contextlib.suppress",
+            "suppress",
+        }
+
     def _visit_with(self, items: list[ast.withitem], body: list[ast.stmt]) -> None:
+        suppressing = any(self._suppresses_exceptions(item) for item in items)
+        guarded_before = set(self.guarded)
         for item in items:
             self.visit(item.context_expr)
             if item.optional_vars is not None:
                 self._assign([item.optional_vars], _PathValue())
         for statement in body:
             self.visit(statement)
+        if suppressing:
+            # Anything the body proved may not actually have run to completion.
+            self.guarded = guarded_before
 
     def visit_With(self, node: ast.With) -> None:
         self._visit_with(node.items, node.body)
@@ -2474,7 +2596,9 @@ class _PathFlowVisitor(ast.NodeVisitor):
     ) -> None:
         self.visit(iterator)
         before = self._state()
-        target_value = self._derived(iterator, [self._value(iterator)])
+        target_value = self._derived(
+            iterator, [self._value(iterator)], preserves_containment=True
+        )
         self._assign([target], target_value)
         for statement in body:
             self.visit(statement)
@@ -2529,12 +2653,22 @@ class _PathFlowVisitor(ast.NodeVisitor):
         before = self._state()
         for statement in body:
             self.visit(statement)
+        # A handler can be entered from any point in the body, including from the
+        # containment check itself - that is precisely when a `relative_to` raises.
+        # So the handler starts from the body's bindings, which keeps the taint, but
+        # WITHOUT any guard the body established, because the guard may be what
+        # failed. Restoring the pre-try state instead, as releases before 0.2.4 did,
+        # made the tainted binding look absent on the handler path, so the join saw
+        # only one tainted branch and carried the guard out of the try. That made
+        # `try: t = ROOT / n; t.relative_to(ROOT)` / `except ValueError: pass` report
+        # a clean audit for arbitrary traversal.
+        handler_entry = _PathFlowState(dict(self.bindings), set(before.guarded))
         for statement in orelse:
             self.visit(statement)
         continuing = [] if self._terminates(orelse or body) else [self._state()]
 
         for handler in handlers:
-            self._restore(before)
+            self._restore(handler_entry)
             if handler.type is not None:
                 self.visit(handler.type)
             if handler.name is not None:
@@ -2581,7 +2715,9 @@ class _PathFlowVisitor(ast.NodeVisitor):
         # this the capture was never bound and the taint vanished, letting an
         # unguarded sink report `complete` with no findings before 0.2.3.
         self.visit(node.subject)
-        subject = self._derived(node, [self._value(node.subject)])
+        subject = self._derived(
+            node, [self._value(node.subject)], preserves_containment=True
+        )
         before = self._state()
         states = []
         for case in node.cases:
@@ -2617,7 +2753,11 @@ class _PathFlowVisitor(ast.NodeVisitor):
             self.visit(generator.iter)
             self._assign(
                 [generator.target],
-                self._derived(generator.iter, [self._value(generator.iter)]),
+                self._derived(
+                    generator.iter,
+                    [self._value(generator.iter)],
+                    preserves_containment=True,
+                ),
             )
             for condition in generator.ifs:
                 self.visit(condition)
@@ -2703,6 +2843,8 @@ def _guard_may_be_unresolved(
 def path_lineage_unproven(
     project: ParsedProject,
     tool: ToolDefinition,
+    *,
+    filesystem_relevant: bool,
 ) -> list[Evidence]:
     """Filesystem sinks reached through expression forms the analyzer does not model.
 
@@ -2716,7 +2858,13 @@ def path_lineage_unproven(
         tool,
         {parameter.name for parameter in tool.parameters},
     )
-    return [sink.evidence for sink in result.unproven_sinks] + result.escapes
+    # Unproven sinks always matter: a filesystem call was reached and the lineage
+    # could not be explained. Escapes are only reported when the tool has some
+    # filesystem involvement, because storing a parameter in a dict is one of the
+    # most common lines in Python and says nothing on its own. Reporting them
+    # unconditionally, as 0.2.3 did, failed audits of tools that never open a file.
+    escapes = result.escapes if filesystem_relevant else []
+    return [sink.evidence for sink in result.unproven_sinks] + escapes
 
 
 def path_sink_parameters(project: ParsedProject, tool: ToolDefinition) -> set[str]:

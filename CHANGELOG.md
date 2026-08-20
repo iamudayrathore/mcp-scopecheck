@@ -1,6 +1,61 @@
 # Changelog
 
-## 0.2.3 - 2026-08-19
+## 0.2.4 - 2026-08-19
+
+Rewrites the `MSC103` containment model. 0.2.2 and 0.2.3 were never published.
+
+Containment was a mark that spread: a check set a flag and every propagation rule
+had to remember not to carry it. Each rule that was touched got that wrong in a
+different way, so three consecutive releases oscillated - 0.2.1 too permissive,
+0.2.2 too strict, 0.2.3 permissive again through new mechanisms. Containment is now
+a fact that must be proven to survive each step, and the default is that it does
+not.
+
+- A containment check establishes nothing when its failure can be swallowed. A
+  `relative_to` inside a `try` whose handler continues, or inside
+  `contextlib.suppress`, no longer clears the sink - that handler is reached
+  precisely when the check fails. An exception handler now starts from the try
+  body's bindings without the proofs that body established, because it can be
+  entered from any point in the body including the check itself.
+- Containment no longer transfers to derived values. It survives pure normalization
+  (`resolve`, `absolute`) and rebinding, and is dropped by anything that adds a path
+  component or changes the root, so `t / ".." / "etc" / "passwd"`,
+  `t.joinpath(...)`, and `t.expanduser()` are unguarded again after `t` is proven
+  contained. `_derived` now requires containment preservation to be declared per
+  derivation and defaults to dropping it.
+- Stores through a call now fail closed regardless of spelling.
+  `d.__setitem__(k, p)`, `operator.setitem(d, k, p)`, `heapq.heappush(q, p)`, and
+  `deque.appendleft(p)` degrade the audit exactly as `d[k] = p` already did, instead
+  of silently discarding the value. Any unfollowable call that receives tool input
+  and discards its result records an escape rather than being allowlisted by name.
+- Escapes are reported only when the tool has a modeled filesystem capability or a
+  path-shaped parameter. 0.2.3 failed audits of tools that never open a file for
+  storing a parameter in a dict, which is one of the most common lines in Python.
+- Fixed an unhandled `LookupError` for a declared codec that exists but is not a
+  text encoding (`rot13`, `base64`, `hex`, `bz2`, `zlib`, `quopri`, `uu`). CPython
+  raises it from `tokenize.detect_encoding` rather than from `.decode`, so a crafted
+  coding cookie crashed the audit with exit `1` and no output - which the exit
+  contract defines as "complete, findings at threshold". Present since 0.1.2 and
+  live in published 0.2.1.
+- `scripts/check_action_pin.sh` gained a release-time mode that compares the
+  README's pinned commit's `action.yml` against the release. 0.2.3 documented a pin
+  whose action predated the `--` pip hardening its own notes advertised.
+- `scripts/validate_release.py` grew to 129 checks, adding defeated-guard and
+  untracked-store groups. Against the unfixed 0.2.3 build it now fails 17 checks; it
+  previously passed that build 107/107.
+- README, `docs/architecture.md`, and `docs/limitations.md` now describe the model
+  the code implements. The previous text asserted that guards intersect at joins,
+  which had not been true since 0.2.3.
+- No change to the exit-code contract, the no-execution invariant, the resource
+  limits, the SARIF schema, or the snapshot digest payload.
+
+
+## 0.2.3 - never published
+
+Superseded by 0.2.4 before release. A pre-release audit found the guard model
+cleared real traversal through three mechanisms and its escape reporting failed
+ordinary servers. The changes below shipped as part of 0.2.4.
+
 
 Closes the path-taint gaps that 0.2.2 left open, and the false positive 0.2.2
 introduced. 0.2.2 was never published.

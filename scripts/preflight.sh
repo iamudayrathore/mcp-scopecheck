@@ -27,4 +27,4 @@ python3 -m venv "${temporary_output}/venv"
 "${temporary_output}/venv/bin/python" -m pip install --quiet --disable-pip-version-check "${wheel}"
 python3 scripts/validate_release.py "${temporary_output}/venv/bin/mcp-scopecheck"
 
-"${repository_root}/scripts/check_action_pin.sh"
+CHECK_ACTION_PIN_STRICT=1 "${repository_root}/scripts/check_action_pin.sh"

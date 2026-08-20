@@ -21,6 +21,7 @@ from .models import (
     AnalysisNotification,
     AnalysisStatus,
     AuditReport,
+    Capability,
 )
 from .parser import parse_project
 
@@ -230,7 +231,18 @@ def audit(target: str | Path) -> AuditReport:
     # states depend on.
     unproven_lineage = False
     for tool in project.tools:
-        for evidence in path_lineage_unproven(project, tool):
+        # A store only hides filesystem scope if the tool touches the filesystem or
+        # declares a path-shaped input; otherwise it is ordinary data handling.
+        filesystem_relevant = any(
+            item.capability
+            in {Capability.FILESYSTEM_READ, Capability.FILESYSTEM_WRITE}
+            for item in capabilities.get(tool.key, [])
+        ) or any(
+            _is_path_parameter_name(parameter.name) for parameter in tool.parameters
+        )
+        for evidence in path_lineage_unproven(
+            project, tool, filesystem_relevant=filesystem_relevant
+        ):
             unproven_lineage = True
             notifications.append(
                 AnalysisNotification(
