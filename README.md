@@ -80,7 +80,7 @@ jobs:
         with:
           target: path/to/python/server
           fail-on: high
-          version: "0.2.5"      # scanner version, independent of the pin above
+          version: "0.2.2"      # scanner version, independent of the pin above
       - uses: github/codeql-action/upload-sarif@<pinned-sha>
         if: always()
         with:
@@ -150,7 +150,7 @@ side effect in a fixture and proves it does not execute during an audit.
 
 ### Filesystem containment is not analyzed
 
-`MSC103` and `MSC104` are **withdrawn as of 0.2.5.** They attempted to decide
+`MSC103` and `MSC104` are **withdrawn as of 0.2.2.** They attempted to decide
 whether caller-controlled filesystem access was constrained, and across four
 consecutive release candidates they got that wrong in alternating directions — the
 last of them still deciding the outcome by whether a parameter happened to be named

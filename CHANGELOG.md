@@ -1,257 +1,40 @@
 # Changelog
 
-## 0.2.5 - 2026-08-19
+## 0.2.2 - 2026-08-20
 
-Withdraws `MSC103` and `MSC104`. 0.2.2, 0.2.3, and 0.2.4 were never published.
-
-Both rules decided whether caller-controlled filesystem access was constrained.
-Across four consecutive release candidates they got that wrong in alternating
-directions - too permissive, too strict, permissive again through new mechanisms,
-and finally still gated on whether a parameter was named `path` rather than
-`title`, which is the mechanism the project's own draft advisory is written about.
-Each fix was correct for the case that motivated it, and the class survived every
-time. A rule that cannot decide a property reliably must not claim to.
-
-- Removed `MSC103` and `MSC104`, the containment machinery behind them (about 1,000
-  lines), the `MSC103-GUARD-UNKNOWN` and `MSC103-LINEAGE-UNPROVEN` notifications,
-  and their entries in the SARIF rule catalogue. Restoring them needs path-aware
-  dataflow rather than the token-set model that failed; that is a design change.
-- Kept filesystem capability reporting and its evidence path, which are decided by
-  the call graph rather than by the guard model. A report still states that a tool
-  reaches a filesystem operation and how; it no longer states whether the path is
-  contained, and the documentation says so plainly.
-- Fixed a capability that vanished when a helper built the path itself:
-  `def _resolve(n): return ROOT / n` followed by `_resolve(name).write_text(body)`
-  reported `Observed: none` under a `complete` audit - an arbitrary
-  caller-controlled write, denied outright, and the denial changed with the
-  parameter's name. A resolvable project-local callee that returns a path
-  expression is now recognised as returning a path.
-- Stopped inventing filesystem capabilities. A receiver the analyzer only infers to
-  be a path must be used with a pathlib-exclusive method before a capability is
-  asserted, so an in-memory cache calling `ENTRIES[key].touch()` is no longer
-  reported as a filesystem write, and no longer produces a `readOnlyHint` conflict.
-- `scripts/validate_release.py` drops the containment groups and grows to 164
-  checks. Its anti-stub assertion, orphaned by the removal, is restored and applied
-  to every group: a case must show that the fixture was actually analyzed - tool
-  discovered, parameters recovered, contract digest produced - not merely that a
-  verdict was printed. Three integrity checks require the snapshot digest to be
-  well-formed, to differ between different contracts, and to be stable across runs.
-  A regex fake that never parses scores 71/164; a stub that only exits scores
-  56/164.
-- Fixed a capability regression introduced while narrowing speculative path
-  receivers: a directly constructed `Path(...)` was classified as merely inferred,
-  suppressing the capability for every sink method outside a seven-name set.
-  `Path(name).unlink()` reported `Observed: none` under a `complete` audit and a
-  `readOnlyHint=true` claim while `p = Path(name); p.unlink()` reported the write -
-  identical code judged differently on line count. Only a container element, or a
-  call that merely received a path, is speculative now. Walrus-bound paths are also
-  recognised.
-- Removed ten dead module constants left by the withdrawal, including a comment
-  block describing the containment proof model that shipped in the wheel.
-- `docs/limitations.md` no longer guarantees that `Observed: none` is never produced
-  for a tool that touches the filesystem; nothing in the code provides that after
-  the fail-closed lineage path was removed. `docs/architecture.md` no longer carries
-  an orphaned fragment asserting that guard lineage remains supported.
-- Removed the speculative-path heuristic entirely. It classified a container
-  element as possibly-a-path and then gated that on method names, which made the
-  verdict depend on spelling in both directions: `ENTRIES[key].touch()` reported
-  nothing while `entry = ENTRIES[key]; entry.touch()` reported a filesystem write
-  and a HIGH read-only conflict on an in-memory dict. A `.resolve()` hop or `str()`
-  laundered it the same way. That is the spelling-dependent verdict that led to
-  withdrawing MSC103, in the capability layer. A path retrieved from a container by
-  subscript is now simply not tracked - a bounded false negative, documented and
-  pinned by a test, in place of an unbounded false positive on ordinary code.
-- `str(path)` yields a string rather than a path, because `str.replace` collides
-  with `Path.replace`, which renames a file.
-- `UnresolvedReason.UNRESOLVED_ARGUMENT_LINEAGE` no longer prints "guard lineage";
-  guards are withdrawn and the string implied a model that no longer exists.
-- The release gate's integrity checks were satisfiable by hashing the source text,
-  which is not analysis, and the release notes claimed the opposite. They now
-  require the contract digest to be invariant under edits that change the bytes
-  without changing the contract, while still differing when the contract differs.
-  A source-hashing pattern-matcher scores 130/164; a print-and-exit stub 55/164.
+- Withdrew `MSC103` (filesystem scope) and `MSC104` (dangerous filesystem default),
+  along with the containment machinery behind them and their SARIF catalogue
+  entries. Both decided whether caller-controlled filesystem access was constrained,
+  and 0.2.1 decided it by matching the parameter's *name* against a fixed list, so a
+  traversal through a differently named parameter produced completeness `complete`,
+  no findings, and exit `0`. Four attempts to fix the rule failed in alternating
+  directions; the model could not express containment across Python's control flow.
+  A rule that cannot decide a property reliably must not claim to.
+- Kept filesystem capability reporting and its evidence path, which the call graph
+  decides. A report states that a tool reaches a filesystem operation and how; it no
+  longer states whether the path is contained, and the documentation says plainly
+  that a clean audit is not evidence filesystem access is bounded.
+- Capability reporting no longer depends on how code is spelled. A path built inside
+  a local helper or reached through a chain of calls is observed rather than
+  silently dropped, and semantically identical code no longer produces different
+  verdicts depending on line breaks.
+- A path stored in a container and retrieved by subscript is deliberately not
+  tracked, in place of a heuristic that invented filesystem capabilities on ordinary
+  in-memory code. Documented and pinned by tests.
+- Fixed an unhandled `LookupError` for a declared codec that exists but is not a text
+  encoding (`rot13`, `base64`, `hex`, `bz2`, `zlib`, `quopri`, `uu`). A crafted
+  coding cookie crashed the audit with exit `1` and no output, which the exit
+  contract defines as "complete, findings at threshold". Present since 0.1.2 and live
+  in 0.2.1.
+- Added `scripts/validate_release.py`, 164 behavioural checks against an installed
+  wheel, run by `scripts/preflight.sh` as a release gate. Its integrity checks
+  require the contract digest to be invariant under edits that change source bytes
+  without changing the contract, so a build that does not analyze cannot satisfy it.
+- Published a composite GitHub Action, refreshed all workflow action pins, and added
+  a release-time check that the action commit documented in the README carries the
+  version being released.
 - No change to the exit-code contract, the no-execution invariant, the resource
   limits, the SARIF schema, or the snapshot digest payload.
-
-
-## 0.2.4 - never published
-
-Superseded by 0.2.5 before release. A fifth pre-release audit obtained exit `0`
-with completeness `complete` on real traversal four ways, and found the outcome
-still decided by parameter name. The changes below shipped as part of 0.2.5.
-
-
-Rewrites the `MSC103` containment model. 0.2.2 and 0.2.3 were never published.
-
-Containment was a mark that spread: a check set a flag and every propagation rule
-had to remember not to carry it. Each rule that was touched got that wrong in a
-different way, so three consecutive releases oscillated - 0.2.1 too permissive,
-0.2.2 too strict, 0.2.3 permissive again through new mechanisms. Containment is now
-a fact that must be proven to survive each step, and the default is that it does
-not.
-
-- A containment check establishes nothing when its failure can be swallowed. A
-  `relative_to` inside a `try` whose handler continues, or inside
-  `contextlib.suppress`, no longer clears the sink - that handler is reached
-  precisely when the check fails. An exception handler now starts from the try
-  body's bindings without the proofs that body established, because it can be
-  entered from any point in the body including the check itself.
-- Containment no longer transfers to derived values. It survives pure normalization
-  (`resolve`, `absolute`) and rebinding, and is dropped by anything that adds a path
-  component or changes the root, so `t / ".." / "etc" / "passwd"`,
-  `t.joinpath(...)`, and `t.expanduser()` are unguarded again after `t` is proven
-  contained. `_derived` now requires containment preservation to be declared per
-  derivation and defaults to dropping it.
-- Stores through a call now fail closed regardless of spelling.
-  `d.__setitem__(k, p)`, `operator.setitem(d, k, p)`, `heapq.heappush(q, p)`, and
-  `deque.appendleft(p)` degrade the audit exactly as `d[k] = p` already did, instead
-  of silently discarding the value. Any unfollowable call that receives tool input
-  and discards its result records an escape rather than being allowlisted by name.
-- Escapes are reported only when the tool has a modeled filesystem capability or a
-  path-shaped parameter. 0.2.3 failed audits of tools that never open a file for
-  storing a parameter in a dict, which is one of the most common lines in Python.
-- Fixed an unhandled `LookupError` for a declared codec that exists but is not a
-  text encoding (`rot13`, `base64`, `hex`, `bz2`, `zlib`, `quopri`, `uu`). CPython
-  raises it from `tokenize.detect_encoding` rather than from `.decode`, so a crafted
-  coding cookie crashed the audit with exit `1` and no output - which the exit
-  contract defines as "complete, findings at threshold". Present since 0.1.2 and
-  live in published 0.2.1.
-- `scripts/check_action_pin.sh` gained a release-time mode that compares the
-  README's pinned commit's `action.yml` against the release. 0.2.3 documented a pin
-  whose action predated the `--` pip hardening its own notes advertised.
-- `scripts/validate_release.py` grew to 129 checks, adding defeated-guard and
-  untracked-store groups. Against the unfixed 0.2.3 build it now fails 17 checks; it
-  previously passed that build 107/107.
-- README, `docs/architecture.md`, and `docs/limitations.md` now describe the model
-  the code implements. The previous text asserted that guards intersect at joins,
-  which had not been true since 0.2.3.
-- Fixed a capability vanishing entirely when a path reached a filesystem call by a
-  route the analyzer did not model. A path returned from a local helper, taken out
-  of a container, or handed to a callback produced `Observed: none` under a
-  `complete` audit - an arbitrary caller-controlled write reported as a tool with no
-  capabilities at all. Present in 0.2.1 and every unpublished release since.
-- Added `visit_While` to the path-flow visitor. A containment check inside a loop
-  body that may never execute was kept unconditionally; every other construct
-  already merged against the not-taken path.
-- A `finally` block containing `return`, `break`, or `continue` now drops what the
-  try body proved, because such a transfer discards an in-flight exception exactly
-  as `except: pass` would.
-- An `assert` no longer establishes containment; `python -O` strips it.
-- An escape is recorded for a method call on a local object whether or not its
-  result is bound. `d.__setitem__(k, p)` degraded the audit while
-  `x = d.__setitem__(k, p)` did not, and binding the result is the realistic form
-  for `pool.submit(...)`.
-- `target.parent`, `target.glob`/`iterdir`/`rglob` children, and
-  `target.with_suffix(...)` preserve containment. Requiring proof to survive every
-  derivation had made the shapes MSC103's own remediation recommends - validate a
-  directory then iterate it, validate a file then write beside it - report as
-  unconstrained. `with_name` is excluded: its argument can contain separators.
-- `scripts/validate_release.py` now asserts why a case was reported, not merely that
-  the exit was non-zero, and requires the fixture to have been analyzed at all. The
-  previous gate was satisfied 90/129 by a stub that only ever exited `2`; the
-  hardened gate fails 100 of 146 against that same stub. Grown to 146 checks with
-  capability-visibility cases and every reproduction from the fourth audit.
-- No change to the exit-code contract, the no-execution invariant, the resource
-  limits, the SARIF schema, or the snapshot digest payload.
-
-
-## 0.2.3 - never published
-
-Superseded by 0.2.4 before release. A pre-release audit found the guard model
-cleared real traversal through three mechanisms and its escape reporting failed
-ordinary servers. The changes below shipped as part of 0.2.4.
-
-
-Closes the path-taint gaps that 0.2.2 left open, and the false positive 0.2.2
-introduced. 0.2.2 was never published.
-
-- Fixed generator expressions hiding every capability inside them. Both visitors
-  read only the first iterable, so a call in the element expression was never
-  observed: `"".join(subprocess.check_output(cmd, shell=True) for _ in ...)` on a
-  `readOnlyHint=true` tool reported `Side effects: 0`, `Observed: none`,
-  `complete`, exit `0` - an affirmative denial of a capability the tool has. Both
-  now use the same traversal already used for list, set, and dict comprehensions.
-- Fixed taint being dropped for assignment targets the analyzer does not track.
-  `_assigned_names` returned nothing for subscript and attribute targets, so
-  `_assign` bound nothing and the fail-closed path added in 0.2.2 never engaged.
-  Storing tool input in `d["k"]`, `obj.attr`, or a `global` now records an escape,
-  degrading the audit to `partial` with an `MSC103-LINEAGE-UNPROVEN` notification.
-- Added `match` statement capture binding, so `case str() as target:` carries the
-  subject's taint instead of losing it.
-- Added container mutation tracking: `queue.append(path)` taints `queue`, so a
-  later `queue[0]` reaching a filesystem call is reported.
-- Fixed a false positive introduced by 0.2.2's union-at-join. A branch that
-  rebinds a name to an untainted value no longer dissolves the guard established
-  by the branch that carries the taint, so the canonical containment idiom - guard
-  in `try`, fixed path in `except` - is clean again.
-- Fixed a longer-standing guard gap: `target.resolve().relative_to(ROOT)` now
-  establishes containment for `target` itself. Guarding only the normalized
-  temporary reported correct containment code as unconstrained, in 0.2.1 and
-  earlier as well.
-- `action.yml` passes `--` to `pip install`, so a package value beginning with a
-  dash cannot be parsed as a pip option.
-- The documented workflow now sets the scanner `version` explicitly rather than
-  inheriting it from the pinned commit's `action.yml`. A pinned SHA carries
-  whatever version was current when it was written, which silently tied users to
-  an older scanner. A unit test and `scripts/check_action_pin.sh`, now run in CI,
-  fail the build when the documented version drifts from the release.
-- Added `scripts/validate_release.py`: 107 behavioural checks against an installed
-  wheel covering path lineage, execution sinks, benign servers, the no-execution
-  invariant, hostile input, output forgery, exit codes, and SARIF.
-  `scripts/preflight.sh` builds a wheel, installs it in a throwaway environment,
-  and runs them.
-- No change to the exit-code contract, the no-execution invariant, the resource
-  limits, the SARIF schema, or the snapshot digest payload.
-
-
-## 0.2.2 - never published
-
-Superseded by 0.2.3 before release. A pre-release audit found it did not close the
-failure class it was written to close: generator expressions hid every capability
-inside them, and storing tool input in a subscript, an attribute, a `match`
-capture, or a module global dropped the taint silently, so a `readOnlyHint=true`
-tool doing unrestricted caller-controlled I/O still reported `complete`, no
-findings, exit `0`. Its claims "None returns a clean result" and "No new false
-positives were found" were both wrong. The changes below shipped as part of 0.2.3.
-
-
-Second correctness patch for filesystem-scope analysis, plus process and
-dynamic-code sink coverage. Required for anyone relying on a clean 0.2.1 result.
-
-- Fixed path-taint propagation. 0.2.1 fixed which parameters were seeded into the
-  filesystem dataflow but not how taint propagated, so one ordinary string
-  operation still laundered a caller-controlled path into a clean audit:
-  `open(path.strip("/"))` produced completeness `complete`, no findings, and exit
-  `0`. Taint now propagates through `%` formatting, `.format`, `.join`,
-  `os.sep.join`, `posixpath.join`, the string-deriving method family
-  (`.strip`/`.lstrip`/`.rstrip`/`.replace`/`.removeprefix`/`.removesuffix`/
-  `.encode`/`.decode` and peers), `urllib.parse.unquote`, subscripting, slicing,
-  conditional expressions, walrus bindings, container literals, starred arguments,
-  and tuple unpacking.
-- Fixed control-flow joins. The join previously intersected bindings, so
-  `try:`/`except:` assignment, a `for` loop that may not execute, and augmented
-  assignment silently untainted a value. Taint now unions across joined branches
-  and guards intersect: a value tainted on any reachable branch is tainted after
-  the join, and a guard survives only when every joined branch established it.
-- Unfollowed path lineage now fails closed. An expression form outside the model
-  no longer clears the value; the sink is reported as `MSC103-LINEAGE-UNPROVEN`,
-  the audit becomes `partial`, and the exit status is `2`. `MSC103` itself is
-  withheld there because the rule asserts a path is unguarded, which cannot be
-  claimed about lineage that was not followed.
-- Expanded `MSC106` process sinks to `os.exec*`, `os.spawn*`, `os.posix_spawn*`,
-  `os.fork`, `os.forkpty`, `os.startfile`, `pty.spawn`, `pty.fork`, `pty.openpty`,
-  and `multiprocessing.Process`. A tool declaring `readOnlyHint=true` and calling
-  `pty.spawn` previously reported `Observed: none` and exit `0`, affirmatively
-  denying a capability it had.
-- Expanded `MSC107` dynamic-code sinks to `compile`, `runpy.run_path`,
-  `runpy.run_module`, `code.interact`, `code.InteractiveInterpreter`, and
-  `types.FunctionType`.
-- Documented that sink coverage is an allowlist for every capability, not only
-  network. `Observed: none` means none that are modeled.
-- No change to the exit-code contract, the no-execution invariant, the resource
-  limits, the SARIF schema, or the snapshot digest payload. Expect materially more
-  findings and more `partial` results on unchanged source; both are corrections.
-
 
 ## 0.2.1 - 2026-08-19
 
