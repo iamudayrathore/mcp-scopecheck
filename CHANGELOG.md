@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.3 - 2026-08-20
+
+- Preserve the exact function object captured by each supported tool decorator.
+  A later module-level definition with the same Python name no longer replaces an
+  earlier registered tool's analysis root and hide its reachable capabilities.
+- Model statically selected module-level branches and fail closed when module or
+  function control flow leaves an import, path, client, or nested-function binding
+  ambiguous at a reachable call. These cases now produce an explicit unresolved
+  edge, partial completeness, and exit `2` instead of a complete clean audit.
+- Do not classify calls already proven to target project-local functions as
+  built-in or third-party capability sinks. A benign same-file helper named `eval`
+  no longer produces a false Critical `MSC107` finding; the helper body remains
+  reachable and is analyzed normally.
+- Added unit and installed-wheel behavioural regressions for duplicate registered
+  function names, compound-statement imports, ambiguous control-flow bindings, and
+  local helpers whose names collide with modeled sinks.
+- No change to the no-target-execution invariant, runtime dependency boundary,
+  rule catalogue, SARIF schema, resource limits, or exit-code contract.
+
 ## 0.2.2 - 2026-08-20
 
 - Withdrew `MSC103` (filesystem scope) and `MSC104` (dangerous filesystem default),

@@ -87,19 +87,24 @@ Unexpected internal ScopeCheck exceptions are not converted into target errors.
 
 ## Reachability and completeness model
 
-The root of analysis is each discovered module-level tool function. Direct calls
-to named functions in the same file and directly bound nested sync/async
-functions are followed transitively. v0.2 also resolves static relative and
+The root of analysis is the exact function definition captured by each discovered
+module-level tool decorator. A later definition that reuses the same Python name
+does not replace that registered root. Direct calls to named functions in the same
+file and directly bound nested sync/async functions are followed transitively.
+v0.2 also resolves static relative and
 absolute imports to Python files already accepted under the audit root. It
 follows direct imported-function calls, aliases, qualified local-module function
 calls, and one explicit `__init__.py` re-export hop. Resolution requires one
 module file and one module-level function target. Module cycles terminate through
 visited-state tracking.
 
-Function-local imports are resolved at the call site; parameters, assignments,
-deletion, and later imports update lexical bindings in statement order. At
-control-flow joins, a module/client/path binding is retained only when both
-analyzed paths agree. ScopeCheck never imports a module to resolve it, searches
+Module and function-local imports are resolved at the call site; parameters,
+assignments, deletion, and later imports update lexical bindings in statement
+order. Literal `True` and `False` branches select the statically determined path.
+At other modeled control-flow joins, module, client, path, and nested-function
+bindings are retained only when analyzed paths agree. If an ambiguous binding is
+then called from reachable code, it enters the unresolved-edge ledger and makes
+the audit partial. ScopeCheck never imports a module to resolve it, searches
 installed packages, or leaves the accepted audit root.
 
 Defining a nested function or lambda does not make its body reachable. Decorator

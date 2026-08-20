@@ -8,7 +8,7 @@ from pathlib import Path
 
 from mcp_scopecheck.analyzer import reachable_functions
 from mcp_scopecheck.auditor import audit
-from mcp_scopecheck.models import AuditReport, Capability
+from mcp_scopecheck.models import AnalysisStatus, AuditReport, Capability, UnresolvedReason
 from mcp_scopecheck.parser import parse_project
 
 
@@ -34,6 +34,171 @@ def _network_symbols(report: AuditReport, tool_name: str) -> list[str]:
 
 
 class ScopeReachabilityTests(unittest.TestCase):
+    def test_registered_tool_keeps_its_exact_function_when_name_is_redefined(self) -> None:
+        report = _audit_source(
+            "\n".join(
+                [
+                    "import subprocess",
+                    "@mcp.tool(name='dangerous_first')",
+                    "def duplicate(command):",
+                    "    return subprocess.run(command, shell=True)",
+                    "@mcp.tool(name='benign_second')",
+                    "def duplicate(command):",
+                    "    return command",
+                ]
+            )
+        )
+
+        self.assertEqual(report.completeness.status, AnalysisStatus.COMPLETE)
+        self.assertEqual(
+            _capabilities(report, "dangerous_first"),
+            {Capability.PROCESS_EXECUTION},
+        )
+        self.assertEqual(_capabilities(report, "benign_second"), set())
+        self.assertEqual(
+            [(finding.rule_id, finding.tool_name) for finding in report.findings],
+            [("MSC106", "dangerous_first")],
+        )
+
+    def test_compound_statement_import_bindings_fail_closed(self) -> None:
+        static_branch = _audit_source(
+            "\n".join(
+                [
+                    "if True:",
+                    "    from subprocess import run",
+                    "@mcp.tool()",
+                    "def execute(command):",
+                    "    return run(command, shell=True)",
+                ]
+            )
+        )
+        conditional_branch = _audit_source(
+            "\n".join(
+                [
+                    "enabled = True",
+                    "if enabled:",
+                    "    from subprocess import run",
+                    "else:",
+                    "    run = None",
+                    "@mcp.tool()",
+                    "def execute(command):",
+                    "    return run(command, shell=True)",
+                ]
+            )
+        )
+        try_fallback = _audit_source(
+            "\n".join(
+                [
+                    "@mcp.tool()",
+                    "def execute(command):",
+                    "    try:",
+                    "        import subprocess as process",
+                    "    except ImportError:",
+                    "        process = None",
+                    "    return process.run(command, shell=True)",
+                ]
+            )
+        )
+        static_path = _audit_source(
+            "\n".join(
+                [
+                    "from pathlib import Path",
+                    "if True:",
+                    "    ROOT = Path('/srv/docs')",
+                    "@mcp.tool()",
+                    "def read_index():",
+                    "    return ROOT.read_text()",
+                ]
+            )
+        )
+        conditional_path = _audit_source(
+            "\n".join(
+                [
+                    "from pathlib import Path",
+                    "configured = True",
+                    "if configured:",
+                    "    ROOT = Path('/srv/docs')",
+                    "else:",
+                    "    ROOT = object()",
+                    "@mcp.tool()",
+                    "def read_index():",
+                    "    return ROOT.read_text()",
+                ]
+            )
+        )
+        conditional_helper = _audit_source(
+            "\n".join(
+                [
+                    "if True:",
+                    "    def helper(command):",
+                    "        return command",
+                    "@mcp.tool()",
+                    "def execute(command):",
+                    "    return helper(command)",
+                ]
+            )
+        )
+        conditional_wildcard = _audit_source(
+            "\n".join(
+                [
+                    "if True:",
+                    "    from helpers import *",
+                    "@mcp.tool()",
+                    "def execute(command):",
+                    "    return helper(command)",
+                ]
+            )
+        )
+
+        self.assertEqual(static_branch.completeness.status, AnalysisStatus.COMPLETE)
+        self.assertEqual(
+            _capabilities(static_branch, "execute"),
+            {Capability.PROCESS_EXECUTION},
+        )
+        self.assertEqual(static_path.completeness.status, AnalysisStatus.COMPLETE)
+        self.assertEqual(
+            _capabilities(static_path, "read_index"),
+            {Capability.FILESYSTEM_READ},
+        )
+        for report in (
+            conditional_branch,
+            try_fallback,
+            conditional_path,
+            conditional_helper,
+        ):
+            with self.subTest(report=report.snapshot):
+                self.assertEqual(report.completeness.status, AnalysisStatus.PARTIAL)
+                self.assertEqual(
+                    {edge.reason for edge in report.completeness.unresolved_edges},
+                    {UnresolvedReason.AMBIGUOUS_BINDING},
+                )
+        self.assertEqual(conditional_wildcard.completeness.status, AnalysisStatus.PARTIAL)
+        self.assertIn(
+            UnresolvedReason.WILDCARD_IMPORT,
+            {edge.reason for edge in conditional_wildcard.completeness.unresolved_edges},
+        )
+
+    def test_resolved_local_eval_is_not_dynamic_code_execution(self) -> None:
+        report = _audit_source(
+            "\n".join(
+                [
+                    "def eval(value):",
+                    "    return value.upper()",
+                    "@mcp.tool()",
+                    "def normalize(value):",
+                    "    return eval(value)",
+                ]
+            )
+        )
+
+        self.assertEqual(report.completeness.status, AnalysisStatus.COMPLETE)
+        self.assertEqual(_capabilities(report, "normalize"), set())
+        self.assertEqual(report.findings, [])
+        self.assertEqual(
+            [edge.target_symbol for edge in report.completeness.resolved_edges],
+            ["eval"],
+        )
+
     def test_uncalled_sync_and_async_nested_bodies_are_not_reachable(self) -> None:
         report = _audit_source(
             "\n".join(

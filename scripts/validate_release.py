@@ -121,6 +121,12 @@ class Validator:
         (directory / "server.py").write_bytes(content)
         return directory
 
+    @staticmethod
+    def source(content: str) -> Path:
+        directory = Path(tempfile.mkdtemp())
+        (directory / "server.py").write_text(content, encoding="utf-8")
+        return directory
+
 
 # Capability detection. A path that reaches a filesystem call must be observed even
 # when it arrives by a route the analyzer does not model. Reporting `Observed: none`
@@ -335,6 +341,66 @@ def main() -> int:
         )
         analysed, detail = validator.proves_real_analysis(out)
         validator.check(f"execution/{label}/analyzed", analysed, detail)
+
+    duplicate_tool = validator.source(
+        "import subprocess\n"
+        "@mcp.tool(name='dangerous_first')\n"
+        "def duplicate(command):\n"
+        "    return subprocess.run(command, shell=True)\n"
+        "@mcp.tool(name='benign_second')\n"
+        "def duplicate(command):\n"
+        "    return command\n"
+    )
+    code, out = validator.audit(duplicate_tool)
+    validator.check(
+        "identity/duplicate_registered_function",
+        code == 1 and "MSC106" in out and "Tool:     dangerous_first" in out,
+        f"registered function identity was lost (exit {code})\n{out[-400:]}",
+    )
+
+    conditional_import = validator.source(
+        "if True:\n"
+        "    from subprocess import run\n"
+        "@mcp.tool()\n"
+        "def execute(command):\n"
+        "    return run(command, shell=True)\n"
+    )
+    code, out = validator.audit(conditional_import)
+    validator.check(
+        "bindings/static_compound_import",
+        code == 1 and "MSC106" in out,
+        f"static compound import hid process execution (exit {code})\n{out[-400:]}",
+    )
+
+    ambiguous_import = validator.source(
+        "@mcp.tool()\n"
+        "def execute(command):\n"
+        "    try:\n"
+        "        import subprocess as process\n"
+        "    except ImportError:\n"
+        "        process = None\n"
+        "    return process.run(command, shell=True)\n"
+    )
+    code, out = validator.audit(ambiguous_import)
+    validator.check(
+        "bindings/ambiguous_import_fails_closed",
+        code == 2 and "ambiguous control-flow binding" in out,
+        f"ambiguous binding produced a clean audit (exit {code})\n{out[-400:]}",
+    )
+
+    local_eval = validator.source(
+        "def eval(value):\n"
+        "    return value.upper()\n"
+        "@mcp.tool()\n"
+        "def normalize(value):\n"
+        "    return eval(value)\n"
+    )
+    code, out = validator.audit(local_eval)
+    validator.check(
+        "resolution/local_eval_is_not_builtin",
+        code == 0 and "MSC107" not in out and "code_execution" not in out,
+        f"resolved local helper was classified as builtin eval (exit {code})\n{out[-400:]}",
+    )
 
     # Documented blind spot, pinned so a change is deliberate rather than silent:
     # a path stored in a container and retrieved by subscript is not tracked. See

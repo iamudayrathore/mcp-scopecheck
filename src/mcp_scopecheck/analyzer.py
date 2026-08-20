@@ -634,10 +634,16 @@ def _local_calls(record: FunctionRecord, project: ParsedProject) -> Iterable[Fun
     yield from _execution(record, project).call_edges
 
 
+def _tool_root(project: ParsedProject, tool: ToolDefinition) -> FunctionRecord | None:
+    """Return the exact function object captured by the tool decorator."""
+
+    return project.tool_functions.get(tool.key)
+
+
 def reachable_functions(project: ParsedProject, tool: ToolDefinition) -> list[FunctionRecord]:
     """Return bounded local functions reachable from a tool, without executing code."""
 
-    root = project.functions.get((tool.source_file, tool.function_name))
+    root = _tool_root(project, tool)
     if root is None:
         return []
     queue: deque[FunctionRecord] = deque([root])
@@ -658,7 +664,7 @@ def _reachable_function_paths(
     project: ParsedProject,
     tool: ToolDefinition,
 ) -> dict[int, tuple[TraceStep, ...]]:
-    root = project.functions.get((tool.source_file, tool.function_name))
+    root = _tool_root(project, tool)
     if root is None:
         return {}
     root_path = (TraceStep(tool.source_file, tool.line_number, tool.function_name),)
@@ -854,7 +860,7 @@ def analyze_reachability(
 ) -> tuple[list[ResolvedCallEdge], list[UnresolvedCallEdge], bool]:
     """Build a bounded honesty ledger for one registered tool."""
 
-    root = project.functions.get((tool.source_file, tool.function_name))
+    root = _tool_root(project, tool)
     if root is None:
         return [], [], False
     queue: deque[tuple[FunctionRecord, int]] = deque([(root, 0)])
@@ -1241,6 +1247,7 @@ class _BindingState:
     paths: set[str]
     clients: dict[str, str]
     nested: dict[str, ast.FunctionDef | ast.AsyncFunctionDef]
+    ambiguous: set[str]
 
 
 def _parameter_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
@@ -1322,6 +1329,7 @@ class _ExecutionVisitor(ast.NodeVisitor):
         self.paths = set(record.path_bindings)
         self.clients = dict(record.client_bindings)
         self.nested: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+        self.ambiguous = set(record.ambiguous_bindings)
         self.result = _ExecutionResult()
         for name in _parameter_names(record.node):
             self._shadow_name(name)
@@ -1343,6 +1351,7 @@ class _ExecutionVisitor(ast.NodeVisitor):
         self.paths.discard(name)
         self.clients.pop(name, None)
         self.nested.pop(name, None)
+        self.ambiguous.discard(name)
 
     def _update_targets(
         self,
@@ -1518,9 +1527,18 @@ class _ExecutionVisitor(ast.NodeVisitor):
             frozenset(self.paths),
             dict(self.clients),
             self.record.wildcard_imports,
+            frozenset(self.ambiguous),
         )
 
     def _direct_call_resolution(self, call: ast.Call) -> _LocalCallResolution:
+        base = call.func
+        while isinstance(base, ast.Attribute):
+            base = base.value
+        if isinstance(base, ast.Name) and base.id in self.ambiguous:
+            return _LocalCallResolution(
+                reason=UnresolvedReason.AMBIGUOUS_BINDING,
+                candidate=base.id,
+            )
         if isinstance(call.func, ast.Name):
             nested = self.nested.get(call.func.id)
             if nested is not None:
@@ -1533,6 +1551,7 @@ class _ExecutionVisitor(ast.NodeVisitor):
             set(self.paths),
             dict(self.clients),
             dict(self.nested),
+            set(self.ambiguous),
         )
 
     def _restore(self, state: _BindingState) -> None:
@@ -1540,6 +1559,7 @@ class _ExecutionVisitor(ast.NodeVisitor):
         self.paths = set(state.paths)
         self.clients = dict(state.clients)
         self.nested = dict(state.nested)
+        self.ambiguous = set(state.ambiguous)
 
     def _merge_states(self, first: _BindingState, second: _BindingState) -> None:
         missing = object()
@@ -1561,10 +1581,30 @@ class _ExecutionVisitor(ast.NodeVisitor):
             for name, function in first.nested.items()
             if second.nested.get(name) is function
         }
+        ambiguous = first.ambiguous | second.ambiguous
+        names = (
+            first.imports.keys()
+            | second.imports.keys()
+            | first.paths
+            | second.paths
+            | first.clients.keys()
+            | second.clients.keys()
+            | first.nested.keys()
+            | second.nested.keys()
+        )
+        for name in names:
+            if (
+                first.imports.get(name, missing) != second.imports.get(name, missing)
+                or (name in first.paths) != (name in second.paths)
+                or first.clients.get(name, missing) != second.clients.get(name, missing)
+                or first.nested.get(name, missing) is not second.nested.get(name, missing)
+            ):
+                ambiguous.add(name)
         self.imports = imports
         self.paths = first.paths & second.paths
         self.clients = clients
         self.nested = nested
+        self.ambiguous = ambiguous
 
     def visit_Name(self, node: ast.Name) -> None:
         self.result.visited_ids.add(id(node))
@@ -1736,6 +1776,11 @@ class _ExecutionVisitor(ast.NodeVisitor):
 
     def visit_If(self, node: ast.If) -> None:
         self.visit(node.test)
+        if isinstance(node.test, ast.Constant) and isinstance(node.test.value, bool):
+            selected = node.body if node.test.value else node.orelse
+            for statement in selected:
+                self.visit(statement)
+            return
         before = self._state()
         for statement in node.body:
             self.visit(statement)
@@ -1745,6 +1790,73 @@ class _ExecutionVisitor(ast.NodeVisitor):
             self.visit(statement)
         else_state = self._state()
         self._merge_states(body_state, else_state)
+
+    def visit_While(self, node: ast.While) -> None:
+        self.visit(node.test)
+        if isinstance(node.test, ast.Constant) and node.test.value is False:
+            for statement in node.orelse:
+                self.visit(statement)
+            return
+        before = self._state()
+        for statement in node.body:
+            self.visit(statement)
+        after_body = self._state()
+        self._merge_states(before, after_body)
+        for statement in node.orelse:
+            self.visit(statement)
+
+    def _visit_try(self, node: ast.Try | ast.TryStar) -> None:
+        before = self._state()
+        for statement in node.body:
+            self.visit(statement)
+        for statement in node.orelse:
+            self.visit(statement)
+        branches = [self._state()]
+        for handler in node.handlers:
+            self._restore(before)
+            if handler.type is not None:
+                self.visit(handler.type)
+            if handler.name:
+                self._shadow_name(handler.name)
+            for statement in handler.body:
+                self.visit(statement)
+            branches.append(self._state())
+        merged = branches[0]
+        for branch in branches[1:]:
+            self._restore(merged)
+            self._merge_states(merged, branch)
+            merged = self._state()
+        self._restore(merged)
+        for statement in node.finalbody:
+            self.visit(statement)
+
+    def visit_Try(self, node: ast.Try) -> None:
+        self._visit_try(node)
+
+    def visit_TryStar(self, node: ast.TryStar) -> None:
+        self._visit_try(node)
+
+    def visit_Match(self, node: ast.Match) -> None:
+        self.visit(node.subject)
+        before = self._state()
+        branches = [before]
+        for case in node.cases:
+            self._restore(before)
+            for pattern in ast.walk(case.pattern):
+                name = getattr(pattern, "name", None)
+                if isinstance(name, str):
+                    self._shadow_name(name)
+            if case.guard is not None:
+                self.visit(case.guard)
+            for statement in case.body:
+                self.visit(statement)
+            branches.append(self._state())
+        merged = branches[0]
+        for branch in branches[1:]:
+            self._restore(merged)
+            self._merge_states(merged, branch)
+            merged = self._state()
+        self._restore(merged)
 
     def _visit_comprehension(
         self,
@@ -1823,6 +1935,8 @@ def _network_destinations(
         for node in execution.nodes:
             if not isinstance(node, ast.Call):
                 continue
+            if id(node) in execution.call_edges_by_call:
+                continue
             imports = execution.imports_for(node)
             symbol = execution.instance_network_calls.get(id(node))
             if symbol is None:
@@ -1868,6 +1982,8 @@ def analyze_capabilities(
                     symbol = instance_symbol
                     capability = Capability.NETWORK_EGRESS
                 else:
+                    if id(node) in execution.call_edges_by_call:
+                        continue
                     symbol = _qualified_name(node.func, imports)
                     capability = _call_capability(node, symbol, imports)
             elif isinstance(node, ast.Subscript):
@@ -1950,6 +2066,7 @@ def _reads_environment(node: ast.AST, execution: _ExecutionResult) -> bool:
         (
             isinstance(child, ast.Call)
             and id(child) in execution.visited_ids
+            and id(child) not in execution.call_edges_by_call
             and _call_capability(
                 child,
                 _qualified_name(child.func, execution.imports_for(child)),
@@ -2000,6 +2117,8 @@ def _tainted_environment_to_network(
             continue
 
         if not isinstance(node, ast.Call):
+            continue
+        if id(node) in execution.call_edges_by_call:
             continue
         imports = execution.imports_for(node)
         name = execution.instance_network_calls.get(id(node))

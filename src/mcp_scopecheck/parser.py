@@ -129,6 +129,7 @@ class FunctionRecord:
     path_bindings: frozenset[str] = frozenset()
     client_bindings: dict[str, str] = field(default_factory=dict)
     wildcard_imports: tuple[tuple[int, str], ...] = ()
+    ambiguous_bindings: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -139,6 +140,7 @@ class ParsedProject:
     files_scanned: int = 0
     tools: list[ToolDefinition] = field(default_factory=list)
     functions: dict[tuple[str, str], FunctionRecord] = field(default_factory=dict)
+    tool_functions: dict[str, FunctionRecord] = field(default_factory=dict)
     diagnostics: list[Diagnostic] = field(default_factory=list)
     potential_registrations: list[PotentialRegistration] = field(default_factory=list)
     module_files: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -589,26 +591,195 @@ def _relative_import_name(node: ast.ImportFrom, item: ast.alias) -> str:
     return f"{base}{separator}{item.name}" if base else item.name
 
 
-def _imports(tree: ast.Module) -> dict[str, str]:
+@dataclass
+class _ModuleBindingState:
+    aliases: dict[str, str] = field(default_factory=dict)
+    paths: set[str] = field(default_factory=set)
+    ambiguous: set[str] = field(default_factory=set)
+    wildcard_imports: set[tuple[int, str]] = field(default_factory=set)
+
+    def clone(self) -> _ModuleBindingState:
+        return _ModuleBindingState(
+            dict(self.aliases),
+            set(self.paths),
+            set(self.ambiguous),
+            set(self.wildcard_imports),
+        )
+
+
+def _module_assigned_names(node: ast.AST) -> set[str]:
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, (ast.List, ast.Tuple)):
+        return {
+            name
+            for item in node.elts
+            for name in _module_assigned_names(item)
+        }
+    return set()
+
+
+def _set_module_binding(
+    state: _ModuleBindingState,
+    name: str,
+    value: str,
+    *,
+    is_path: bool = False,
+) -> None:
+    state.aliases[name] = value
+    state.paths.discard(name)
+    if is_path:
+        state.paths.add(name)
+    state.ambiguous.discard(name)
+
+
+def _join_module_states(states: list[_ModuleBindingState]) -> _ModuleBindingState:
+    if not states:
+        return _ModuleBindingState()
+    missing = object()
     aliases: dict[str, str] = {}
-    for node in tree.body:
+    paths = set.intersection(*(state.paths for state in states))
+    ambiguous = set().union(*(state.ambiguous for state in states))
+    wildcard_imports = set().union(*(state.wildcard_imports for state in states))
+    names = set().union(*(state.aliases.keys() for state in states))
+    for name in names:
+        values = [state.aliases.get(name, missing) for state in states]
+        first = values[0]
+        if all(value == first for value in values) and first is not missing:
+            aliases[name] = first  # type: ignore[assignment]
+        else:
+            aliases[name] = ""
+            ambiguous.add(name)
+        if any((name in state.paths) != (name in states[0].paths) for state in states[1:]):
+            ambiguous.add(name)
+    return _ModuleBindingState(aliases, paths, ambiguous, wildcard_imports)
+
+
+def _module_bindings_for_statements(
+    statements: list[ast.stmt],
+    initial: _ModuleBindingState | None = None,
+    *,
+    direct_module_body: bool = False,
+) -> _ModuleBindingState:
+    state = initial.clone() if initial is not None else _ModuleBindingState()
+    for node in statements:
         if isinstance(node, ast.Import):
             for item in node.names:
                 bound_name = item.asname or item.name.split(".")[0]
-                aliases[bound_name] = item.name if item.asname else bound_name
+                _set_module_binding(
+                    state,
+                    bound_name,
+                    item.name if item.asname else bound_name,
+                )
         elif isinstance(node, ast.ImportFrom):
             for item in node.names:
-                aliases[item.asname or item.name] = _relative_import_name(node, item)
+                if item.name == "*":
+                    state.wildcard_imports.add(
+                        (_node_line_number(node), node.module or "." * node.level)
+                    )
+                    continue
+                _set_module_binding(
+                    state,
+                    item.asname or item.name,
+                    _relative_import_name(node, item),
+                )
         elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            value = node.value if isinstance(node, (ast.Assign, ast.AnnAssign)) else None
+            is_path = value is not None and _is_path_expression(
+                value,
+                state.aliases,
+                state.paths,
+            )
             for target in targets:
-                if isinstance(target, ast.Name):
-                    aliases[target.id] = ""
+                for name in _module_assigned_names(target):
+                    _set_module_binding(state, name, "", is_path=is_path)
+        elif isinstance(node, ast.Delete):
+            for target in node.targets:
+                for name in _module_assigned_names(target):
+                    _set_module_binding(state, name, "")
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            aliases.pop(node.name, None)
+            if direct_module_body:
+                state.aliases.pop(node.name, None)
+                state.paths.discard(node.name)
+                state.ambiguous.discard(node.name)
+            else:
+                _set_module_binding(state, node.name, "")
+                state.ambiguous.add(node.name)
         elif isinstance(node, ast.ClassDef):
-            aliases[node.name] = ""
-    return aliases
+            _set_module_binding(state, node.name, "")
+            if not direct_module_body:
+                state.ambiguous.add(node.name)
+        elif isinstance(node, ast.If):
+            if isinstance(node.test, ast.Constant) and isinstance(node.test.value, bool):
+                selected = node.body if node.test.value else node.orelse
+                state = _module_bindings_for_statements(selected, state)
+            else:
+                state = _join_module_states(
+                    [
+                        _module_bindings_for_statements(node.body, state),
+                        _module_bindings_for_statements(node.orelse, state),
+                    ]
+                )
+        elif isinstance(node, (ast.Try, ast.TryStar)):
+            success = _module_bindings_for_statements(node.body, state)
+            success = _module_bindings_for_statements(node.orelse, success)
+            branches = [success]
+            for handler in node.handlers:
+                handler_state = state.clone()
+                if handler.name:
+                    _set_module_binding(handler_state, handler.name, "")
+                branches.append(_module_bindings_for_statements(handler.body, handler_state))
+            state = _join_module_states(branches)
+            state = _module_bindings_for_statements(node.finalbody, state)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+            loop_state = state.clone()
+            if isinstance(node, (ast.For, ast.AsyncFor)):
+                for name in _module_assigned_names(node.target):
+                    _set_module_binding(loop_state, name, "")
+            loop_state = _module_bindings_for_statements(node.body, loop_state)
+            state = _join_module_states([state, loop_state])
+            state = _module_bindings_for_statements(node.orelse, state)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for with_item in node.items:
+                if with_item.optional_vars is None:
+                    continue
+                is_path = _is_path_expression(
+                    with_item.context_expr,
+                    state.aliases,
+                    state.paths,
+                )
+                for bound_name in _module_assigned_names(with_item.optional_vars):
+                    _set_module_binding(state, bound_name, "", is_path=is_path)
+            state = _module_bindings_for_statements(node.body, state)
+        elif isinstance(node, ast.Match):
+            branches = [state.clone()]
+            for case in node.cases:
+                case_state = state.clone()
+                for pattern in ast.walk(case.pattern):
+                    pattern_name = getattr(pattern, "name", None)
+                    if isinstance(pattern_name, str):
+                        _set_module_binding(case_state, pattern_name, "")
+                branches.append(_module_bindings_for_statements(case.body, case_state))
+            state = _join_module_states(branches)
+    return state
+
+
+def _imports(
+    tree: ast.Module,
+) -> tuple[
+    dict[str, str],
+    frozenset[str],
+    frozenset[str],
+    tuple[tuple[int, str], ...],
+]:
+    state = _module_bindings_for_statements(tree.body, direct_module_body=True)
+    return (
+        state.aliases,
+        frozenset(state.ambiguous),
+        frozenset(state.paths),
+        tuple(sorted(state.wildcard_imports)),
+    )
 
 
 def _import_qualified_name(node: ast.AST, imports: dict[str, str]) -> str:
@@ -645,31 +816,6 @@ def _is_path_expression(
     }:
         return _is_path_expression(node.func.value, imports, path_bindings)
     return False
-
-
-def _module_path_bindings(tree: ast.Module, imports: dict[str, str]) -> frozenset[str]:
-    bindings: set[str] = set()
-    for node in tree.body:
-        targets: list[ast.AST] = []
-        value: ast.AST | None = None
-        if isinstance(node, ast.Assign):
-            targets = list(node.targets)
-            value = node.value
-        elif isinstance(node, ast.AnnAssign):
-            targets = [node.target]
-            value = node.value
-        if not targets:
-            continue
-        assigned = {
-            target.id
-            for target in targets
-            if isinstance(target, ast.Name)
-        }
-        is_path = value is not None and _is_path_expression(value, imports, bindings)
-        bindings.difference_update(assigned)
-        if is_path:
-            bindings.update(assigned)
-    return frozenset(bindings)
 
 
 def _candidate_files(target: Path) -> Iterable[Path]:
@@ -910,27 +1056,22 @@ def parse_project(target: str | Path) -> ParsedProject:
             return _finish_project(project)
         total_ast_nodes += node_count
 
-        aliases = _imports(tree)
+        aliases, ambiguous_bindings, path_bindings, wildcard_imports = _imports(tree)
         project.module_imports[relative] = aliases
-        path_bindings = _module_path_bindings(tree, aliases)
-        wildcard_imports = tuple(
-            (_node_line_number(node), node.module or "." * node.level)
-            for node in tree.body
-            if isinstance(node, ast.ImportFrom)
-            and any(item.name == "*" for item in node.names)
-        )
         for node in tree.body:
             if isinstance(node, ast.ClassDef):
                 project.classes.add((relative, node.name))
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            project.functions[(relative, node.name)] = FunctionRecord(
+            record = FunctionRecord(
                 relative,
                 node,
                 aliases,
                 path_bindings,
                 wildcard_imports=wildcard_imports,
+                ambiguous_bindings=ambiguous_bindings,
             )
+            project.functions[(relative, node.name)] = record
             for decorator in node.decorator_list:
                 if not _is_tool_decorator(decorator):
                     continue
@@ -954,8 +1095,7 @@ def parse_project(target: str | Path) -> ParsedProject:
                         ),
                     ):
                         return _finish_project(project)
-                project.tools.append(
-                    ToolDefinition(
+                tool = ToolDefinition(
                         name=name,
                         function_name=node.name,
                         description=description,
@@ -970,7 +1110,8 @@ def parse_project(target: str | Path) -> ParsedProject:
                             if item is not decorator
                         ),
                     )
-                )
+                project.tools.append(tool)
+                project.tool_functions[tool.key] = record
                 break
 
         project.potential_registrations.extend(_potential_registrations(tree, relative))

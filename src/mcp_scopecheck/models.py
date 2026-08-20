@@ -48,6 +48,7 @@ class UnresolvedReason(StrEnum):
     """Stable categories for project-local behavior that was not followed."""
 
     AMBIGUOUS_LOCAL_TARGET = "ambiguous local target"
+    AMBIGUOUS_BINDING = "ambiguous control-flow binding"
     DYNAMIC_IMPORT = "dynamic import"
     GRAPH_RESOURCE_BUDGET = "graph/resource budget"
     HIGHER_ORDER_CALL = "higher-order call"

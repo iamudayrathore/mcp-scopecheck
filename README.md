@@ -80,7 +80,7 @@ jobs:
         with:
           target: path/to/python/server
           fail-on: high
-          version: "0.2.2"      # scanner version, independent of the pin above
+          version: "0.2.3"      # scanner version, independent of the pin above
       - uses: github/codeql-action/upload-sarif@<pinned-sha>
         if: always()
         with:
@@ -187,6 +187,8 @@ v0.2 intentionally supports:
 
 - Local Python files/directories
 - Module-level `@mcp.tool`, `@mcp.tool()`, and equivalent `.tool` decorators
+- Exact decorated-function identity when a later definition reuses the same Python
+  name
 - Direct same-file module and nested sync/async helper-call reachability
 - Static relative and absolute in-root Python imports
 - Direct imported-function calls, import aliases, qualified local-module function
@@ -194,6 +196,9 @@ v0.2 intentionally supports:
 - Cross-module filesystem, environment, network, process, and dynamic-code
   capability reachability with shortest source paths
 - Module-level and function-local import aliases with statement-order shadowing
+- Static `True`/`False` module and function branches plus fail-closed unresolved
+  edges when compound control flow leaves a called import, path, client, or nested
+  function binding ambiguous
 - Explicit module-level `httpx`, `requests`, and `requests.api` request functions,
   `urllib.request.urlopen`/`urlretrieve`, `socket.create_connection`, and request
   methods on flow-proven `httpx.Client`, `httpx.AsyncClient`, `requests.Session`,

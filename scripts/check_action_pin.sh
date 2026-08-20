@@ -30,9 +30,9 @@ fi
 echo "check-action-pin: README documents scanner ${documented_version}, matching this release"
 
 # Content comparison: the documented SHA must carry the action code being released.
-# Checking only the version input is not enough - 0.2.3 documented a pin whose
-# action.yml predated the `--` pip hardening its own release notes advertised, so
-# every user copying the README ran an action without the fix.
+# Checking only the version input is not enough - an earlier release candidate
+# documented a pin whose action.yml predated the `--` pip hardening its own release
+# notes advertised, so every user copying the README ran an action without the fix.
 #
 # This runs at release time, not on every pull request. A pull request that changes
 # action.yml necessarily makes the existing pin differ, and the commit to repin to

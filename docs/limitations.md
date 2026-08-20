@@ -1,6 +1,6 @@
 # Limitations
 
-MCP ScopeCheck v0.2.2 performs bounded Python AST analysis over a local file or
+MCP ScopeCheck v0.2.3 performs bounded Python AST analysis over a local file or
 directory. It never imports or executes audited source, starts an MCP server,
 installs target dependencies, or inspects installed packages.
 
@@ -41,13 +41,13 @@ statically recognizable:
 ## Rule boundaries
 
 Cross-module capability facts can inform `MSC101`, `MSC102`, `MSC106`, `MSC107`,
-and `MSC108`. `MSC105` remains same-function. v0.2.2 does not implement
+and `MSC108`. `MSC105` remains same-function. v0.2.3 does not implement
 cross-module environment-to-network taint or general interprocedural data flow.
 
 Sink coverage is an allowlist for **every** capability, not only network.
 Filesystem, process, and dynamic-code sinks are modeled sets of APIs, and an API
 outside a set is not reported at all - the tool will state `Observed: none` for a
-capability it does not model. v0.2.2 covers `subprocess.*`,
+capability it does not model. v0.2.3 covers `subprocess.*`,
 `asyncio.create_subprocess_*`, `os.system`/`popen`/`startfile`, `os.exec*`,
 `os.spawn*`, `os.posix_spawn*`, `os.fork`/`forkpty`, `pty.spawn`/`fork`/`openpty`,
 and `multiprocessing.Process` for process execution, and `eval`, `exec`,
@@ -88,6 +88,13 @@ filesystem writes on in-memory caches, and gating that on method names made
 `D[k].touch()` and `entry = D[k]; entry.touch()` disagree. This is a bounded false
 negative, preferred to an unbounded false positive on ordinary code, and it is
 pinned by a test so it cannot change silently.
+
+Control-flow handling is a bounded binding analysis, not path-sensitive execution.
+Literal boolean branches are selected statically. At modeled `if`, loop,
+`try`/`except`, `except*`, and `match` joins, a binding used as a reachable call
+target is resolved only when the analyzed paths agree; disagreement is reported as
+an unresolved edge and makes the audit partial. This does not prove which runtime
+path executes or infer the capability of an ambiguous receiver.
 
 For the same reason `str(path)` yields a string, not a path: `str.replace` and
 `Path.replace` share a name, and the latter renames a file.
