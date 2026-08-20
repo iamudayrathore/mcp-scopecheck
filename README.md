@@ -76,7 +76,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: iamudayrathore/mcp-scopecheck@5474736d301dd20934b79318ac8a5f5623e7e43c
+      - uses: iamudayrathore/mcp-scopecheck@c596e953670ec104350008b96c42acea2fc80b65
         with:
           target: path/to/python/server
           fail-on: high
