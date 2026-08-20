@@ -37,6 +37,29 @@ class ActionPolicyTests(unittest.TestCase):
         self.assertIn("--no-deps", self.text)
         self.assertIn('"mcp-scopecheck==${SCOPECHECK_VERSION}"', self.text)
 
+    def test_readme_documents_the_scanner_version_being_released(self) -> None:
+        """The documented workflow must run this release, not an older scanner.
+
+        The pinned SHA fixes the action code; the `version` input fixes the
+        scanner. If the documented version drifts from the release, everyone
+        copying the README runs a scanner with known-missed detections while the
+        README presents it as current. That drift shipped once already.
+        """
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        released = re.search(r'(?m)^version = "([^"]+)"', pyproject)
+        assert released is not None
+        documented = re.search(r'(?m)^ *version: "([0-9][^"]*)"', readme)
+        self.assertIsNotNone(documented, "README must pin the scanner version explicitly")
+        assert documented is not None
+        self.assertEqual(documented.group(1), released.group(1))
+
+    def test_pip_install_stops_option_parsing(self) -> None:
+        """A package value beginning with a dash must not be read as a pip option."""
+
+        self.assertIn("--no-deps -- \\", self.text)
+
     def test_package_override_defaults_to_empty_so_pypi_stays_the_source(self) -> None:
         """The override exists for testing a checkout, not as the normal path."""
 

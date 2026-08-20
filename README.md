@@ -78,10 +78,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: iamudayrathore/mcp-scopecheck@94fc1b2296dab61ea67ad7dfbda244a85186c8a9
+      - uses: iamudayrathore/mcp-scopecheck@5474736d301dd20934b79318ac8a5f5623e7e43c
         with:
           target: path/to/python/server
           fail-on: high
+          version: "0.2.3"      # scanner version, independent of the pin above
       - uses: github/codeql-action/upload-sarif@<pinned-sha>
         if: always()
         with:
@@ -99,6 +100,14 @@ anything other than a full SHA.
 Release tags in this repository are additionally protected against updates and
 deletions, but pin the SHA regardless - do not extend trust to a tag in any
 repository whose protection you have not verified.
+
+The pinned SHA selects the **action code**; the `version` input selects the
+**scanner**. Keep them separate. A commit's `action.yml` carries whatever scanner
+version was current when it was written, so relying on that default silently ties
+you to an older scanner every time you pin an older commit - which, for a security
+tool, means running one with known-missed detections. Setting `version` explicitly
+makes the scanner you run visible in your own workflow file and reviewable in your
+own diffs.
 
 The action writes SARIF by default and fails the step on a nonzero audit,
 including exit `2`, because a partial or failed analysis is not a clean result.

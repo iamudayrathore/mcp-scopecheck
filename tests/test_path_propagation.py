@@ -38,10 +38,10 @@ PREAMBLE = (
 )
 
 
-def _audit(body: str, *, annotations: str = "") -> AuditReport:
+def _audit(body: str, *, annotations: str = "", preamble_extra: str = "") -> AuditReport:
     decorator = f"@mcp.tool(annotations={{{annotations}}})" if annotations else "@mcp.tool()"
     source = (
-        f"{PREAMBLE}"
+        f"{PREAMBLE}{preamble_extra}\n"
         f"{decorator}\n"
         "def entry(name: str):\n"
         '    """Read a bundled documentation file."""\n'
@@ -216,6 +216,122 @@ class ProcessAndCodeSinkTests(unittest.TestCase):
         for label, body in self.CODE.items():
             with self.subTest(primitive=label):
                 self.assertIn("MSC107", _rules(_audit(body)), f"{label} reported no code execution")
+
+
+class UntrackableStoreTests(unittest.TestCase):
+    """Storing tool input where the analyzer cannot follow it must not read clean.
+
+    0.2.2 claimed "unfollowed lineage fails closed" but `_assigned_names` returned
+    nothing for subscript and attribute targets, so `_assign` bound nothing and the
+    `proven` flag was never set. Four idioms produced completeness `complete`, no
+    findings, and exit 0 for unrestricted caller-controlled file reads.
+    """
+
+    def test_subscript_store_degrades_to_partial(self) -> None:
+        report = _audit(
+            "    request = {}\n"
+            '    request["target"] = name\n'
+            '    open(request["target"]).read()'
+        )
+        self.assertNotEqual(report.completeness.status, AnalysisStatus.COMPLETE)
+        self.assertTrue(
+            any(
+                item.code == "MSC103-LINEAGE-UNPROVEN"
+                for item in report.completeness.notifications
+            )
+        )
+
+    def test_attribute_store_degrades_to_partial(self) -> None:
+        report = _audit(
+            "    class Box:\n        target = None\n"
+            "    Box.target = name\n"
+            "    open(Box.target).read()"
+        )
+        self.assertNotEqual(report.completeness.status, AnalysisStatus.COMPLETE)
+
+    def test_global_write_degrades_to_partial(self) -> None:
+        report = _audit(
+            "    global _PENDING\n    _PENDING = name\n    open(_PENDING).read()",
+            preamble_extra="_PENDING = ''",
+        )
+        self.assertNotEqual(report.completeness.status, AnalysisStatus.COMPLETE)
+
+    def test_match_capture_is_bound_and_reported(self) -> None:
+        report = _audit(
+            "    match name:\n"
+            "        case str() as target:\n"
+            "            open(target).read()"
+        )
+        self.assertIn("MSC103", _rules(report))
+
+    def test_container_mutation_taints_the_container(self) -> None:
+        report = _audit(
+            "    queue = []\n    queue.append(name)\n    open(queue[0]).read()"
+        )
+        self.assertIn("MSC103", _rules(report))
+
+
+class GeneratorExpressionTests(unittest.TestCase):
+    """A generator expression must not hide the capabilities inside it.
+
+    Before 0.2.3 both visitors read only the first `iter`, so a sink in the element
+    expression was never observed at all - `Side effects: 0`, `Observed: none`,
+    `complete`, exit 0, which is an affirmative denial of a capability the tool has.
+    """
+
+    def test_process_execution_inside_a_generator_is_observed(self) -> None:
+        report = _audit(
+            "    import subprocess\n"
+            '    return "".join(\n'
+            "        subprocess.check_output(name, shell=True).decode() for _ in range(1)\n"
+            "    )",
+            annotations="'readOnlyHint': True",
+        )
+        rules = _rules(report)
+        self.assertIn("MSC106", rules)
+        self.assertIn("MSC101", rules)
+
+    def test_filesystem_access_inside_a_generator_is_observed(self) -> None:
+        report = _audit('    return "".join(open(name).read() for _ in range(1))')
+        self.assertIn("MSC103", _rules(report))
+
+
+class GuardSurvivalTests(unittest.TestCase):
+    """Guards must survive normalization and branches that carry no taint."""
+
+    def test_guard_on_a_normalized_temporary_covers_the_receiver(self) -> None:
+        """`t.resolve().relative_to(ROOT)` proves containment for `t` itself."""
+
+        report = _audit(
+            '    target = ROOT / (name + ".md")\n'
+            "    target.resolve().relative_to(ROOT.resolve())\n"
+            "    target.read_text()"
+        )
+        self.assertNotIn("MSC103", _rules(report))
+        self.assertEqual(report.completeness.status, AnalysisStatus.COMPLETE)
+
+    def test_untainted_fallback_branch_does_not_dissolve_the_guard(self) -> None:
+        """The canonical containment idiom: guard in try, fixed path in except."""
+
+        report = _audit(
+            "    try:\n"
+            '        target = ROOT / "sections" / (name + ".md")\n'
+            "        target.resolve().relative_to(ROOT.resolve())\n"
+            "    except ValueError:\n"
+            '        target = ROOT / "index.md"\n'
+            "    target.read_text()"
+        )
+        self.assertNotIn("MSC103", _rules(report))
+
+    def test_an_unguarded_try_branch_is_still_reported(self) -> None:
+        """Guard survival must not silence a genuinely unguarded join."""
+
+        report = _audit(
+            "    try:\n        target = name\n"
+            '    except Exception:\n        target = "d"\n'
+            "    open(target).read()"
+        )
+        self.assertIn("MSC103", _rules(report))
 
 
 if __name__ == "__main__":

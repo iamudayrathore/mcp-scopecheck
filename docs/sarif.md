@@ -49,7 +49,7 @@ jobs:
           python-version: "3.13"
 
       - name: Install ScopeCheck without dependencies
-        run: python -m pip install --no-deps mcp-scopecheck==0.2.2
+        run: python -m pip install --no-deps mcp-scopecheck==0.2.3
 
       - name: Audit and retain exit status
         id: scopecheck

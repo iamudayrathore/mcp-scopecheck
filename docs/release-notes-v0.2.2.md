@@ -1,5 +1,15 @@
 # MCP ScopeCheck v0.2.2
 
+> **This version was never published.** A pre-release audit found that it did not
+> close the failure class it was written to close, and two of the claims below are
+> wrong: "None returns a clean result" and "No new false positives were found".
+> Generator expressions hid every capability inside them, and storing tool input in
+> a subscript, an attribute, a `match` capture, or a module global dropped the taint
+> silently. The count "All 15 process and dynamic-code primitives" is also wrong -
+> the same paragraph names 16. Superseded by
+> [v0.2.3](release-notes-v0.2.3.md), which closes those gaps and pins every claim to
+> a check in the repository. Retained for the record.
+
 Second correctness patch for filesystem-scope analysis, plus process and
 dynamic-code sink coverage. **Upgrading is required for anyone relying on a clean
 0.2.1 result.**

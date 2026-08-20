@@ -1171,6 +1171,13 @@ def _network_method_kind(symbol: str) -> str:
     return "unknown"
 
 
+def _safe_target_description(node: ast.AST) -> str:
+    """Short, bounded description of an assignment target for evidence."""
+
+    rendered = _call_expression(node)
+    return rendered[:80] if rendered else type(node).__name__
+
+
 def _assigned_names(node: ast.AST) -> set[str]:
     if isinstance(node, ast.Name):
         return {node.id}
@@ -1650,8 +1657,12 @@ class _ExecutionVisitor(ast.NodeVisitor):
         self._visit_comprehension(node.generators, [node.key, node.value])
 
     def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
-        if node.generators:
-            self.visit(node.generators[0].iter)
+        # A generator expression is a comprehension. Visiting only the first
+        # iterable, as releases before 0.2.3 did, made every call inside the
+        # element expression invisible: `"".join(subprocess.check_output(cmd,
+        # shell=True) for _ in ...)` reported `Side effects: 0`, `Observed: none`,
+        # `complete`, exit 0 - an affirmative denial of a capability the tool has.
+        self._visit_comprehension(node.generators, [node.elt])
 
 
 def _execution(record: FunctionRecord, project: ParsedProject) -> _ExecutionResult:
@@ -1822,6 +1833,9 @@ class _PathSinkFlow:
 class _PathScopeResult:
     sinks: list[_PathSinkFlow] = field(default_factory=list)
     expanded_sources: set[str] = field(default_factory=set)
+    # Tool input stored where the analyzer cannot follow it. Never silently
+    # discarded: each entry degrades the audit to partial.
+    escapes: list[Evidence] = field(default_factory=list)
 
     @property
     def proven_sinks(self) -> list[_PathSinkFlow]:
@@ -1869,6 +1883,17 @@ STRING_DERIVING_CALLS = {
     "urllib.parse.unquote_plus",
 }
 
+# Methods that place their argument inside the receiver. The receiver then holds
+# tool input, so it must inherit the taint.
+CONTAINER_MUTATORS = {
+    "add",
+    "append",
+    "extend",
+    "insert",
+    "setdefault",
+    "update",
+}
+
 PATH_TRANSFORM_CALLS = {
     "os.fspath",
     "os.path.abspath",
@@ -1908,6 +1933,15 @@ class _PathFlowVisitor(ast.NodeVisitor):
         self.guarded = set(guarded)
         self.result = result
         self.active = active
+        # Names this function rebinds at module or enclosing scope. Assignments to
+        # them leave the function-local model the analyzer tracks.
+        self.escaping_scopes: set[str] = set()
+
+    def visit_Global(self, node: ast.Global) -> None:
+        self.escaping_scopes.update(node.names)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        self.escaping_scopes.update(node.names)
 
     def scan(self) -> set[int]:
         identity = id(self.record.node)
@@ -1940,6 +1974,7 @@ class _PathFlowVisitor(ast.NodeVisitor):
         """
 
         merged: dict[str, _PathValue] = {}
+        guarded = first.guarded & second.guarded
         for name in set(first.bindings) | set(second.bindings):
             left = first.bindings.get(name, _PathValue())
             right = second.bindings.get(name, _PathValue())
@@ -1947,16 +1982,36 @@ class _PathFlowVisitor(ast.NodeVisitor):
                 if left.sources:
                     merged[name] = left
                 continue
-            sources = left.sources | right.sources
-            if not sources:
+            # A branch that rebinds the name to an untainted value contributes no
+            # tainted lineage, so it must not dilute the other branch's guard. The
+            # canonical containment idiom depends on this:
+            #
+            #     try:
+            #         target = ROOT / name
+            #         target.resolve().relative_to(ROOT)   # guard, or raises
+            #     except ValueError:
+            #         target = ROOT / "index.md"           # untainted fallback
+            #
+            # Intersecting guards across both branches, as 0.2.2 did, discarded the
+            # guard the try branch established and reported correct code as
+            # unconstrained. Only branches that actually carry taint are joined.
+            tainted = [value for value in (left, right) if value.sources]
+            if not tainted:
+                continue
+            if len(tainted) == 1:
+                merged[name] = tainted[0]
+                if tainted[0].tokens and tainted[0].tokens <= (
+                    first.guarded if tainted[0] is left else second.guarded
+                ):
+                    guarded |= tainted[0].tokens
                 continue
             merged[name] = _PathValue(
-                sources,
+                left.sources | right.sources,
                 left.tokens | right.tokens,
                 proven=left.proven and right.proven,
             )
         self.bindings = merged
-        self.guarded = first.guarded & second.guarded
+        self.guarded = guarded
 
     def _derived(self, node: ast.AST, values: Iterable[_PathValue]) -> _PathValue:
         items = list(values)
@@ -2073,11 +2128,65 @@ class _PathFlowVisitor(ast.NodeVisitor):
 
     def _assign(self, targets: Iterable[ast.AST], value: _PathValue) -> None:
         for target in targets:
-            for name in _assigned_names(target):
+            names = _assigned_names(target)
+            if value.sources and not names:
+                # The target is a subscript, an attribute, or another form whose
+                # storage location the analyzer does not track (`d["k"] = path`,
+                # `obj.attr = path`). Binding nothing would drop the taint with no
+                # record, which is how a caller-controlled path reached an
+                # unguarded sink under a `complete` audit before 0.2.3. The value
+                # is escaping the model, so say so.
+                self._record_escape(target, value)
+                continue
+            for name in names:
                 if value.sources:
+                    if name in self.escaping_scopes:
+                        # `global X; X = path` publishes tool input to module
+                        # state that other functions read without receiving it as
+                        # an argument. That flow is outside the model, so it must
+                        # not read as clean.
+                        self._record_escape(target, value)
                     self.bindings[name] = value
                 else:
                     self.bindings.pop(name, None)
+
+    def _record_escape(self, node: ast.AST, value: _PathValue) -> None:
+        """Record tool input flowing into a location the analyzer cannot follow."""
+
+        self.result.escapes.append(
+            Evidence(
+                self.record.source_file,
+                _line_number(node),
+                _safe_target_description(node),
+                "tool input is stored in a location outside the supported model",
+            )
+        )
+
+    # Methods that only normalize a path: the result denotes the same file as the
+    # receiver, so proving containment of the result proves it for the receiver.
+    # `expanduser` is excluded - it can move the value to a different root.
+    NORMALIZING_METHODS = frozenset({"absolute", "resolve"})
+
+    def _normalized_bases(self, node: ast.AST) -> list[_PathValue]:
+        """Values whose containment is established by guarding `node`.
+
+        `target.resolve().relative_to(ROOT)` proves `target` is contained just as
+        much as it proves the resolved temporary is, so the guard must reach the
+        receiver. Guarding only the temporary reported correct containment code as
+        unconstrained.
+        """
+
+        values: list[_PathValue] = []
+        current = node
+        while (
+            isinstance(current, ast.Call)
+            and isinstance(current.func, ast.Attribute)
+            and current.func.attr in self.NORMALIZING_METHODS
+            and not current.args
+        ):
+            current = current.func.value
+            values.append(self._value(current))
+        return values
 
     def _guard_tokens(self, call: ast.Call) -> set[int]:
         if not isinstance(call.func, ast.Attribute) or not call.args:
@@ -2088,7 +2197,11 @@ class _PathFlowVisitor(ast.NodeVisitor):
         trusted_root = self._value(call.args[0])
         if not candidate.sources or trusted_root.sources:
             return set()
-        return set(candidate.tokens)
+        tokens = set(candidate.tokens)
+        for base in self._normalized_bases(call.func.value):
+            if base.sources:
+                tokens |= base.tokens
+        return tokens
 
     def _commonpath_guard_tokens(self, node: ast.Compare, truthy: bool) -> set[int]:
         if len(node.ops) != 1:
@@ -2252,8 +2365,29 @@ class _PathFlowVisitor(ast.NodeVisitor):
         self._record_expansion(node)
         if isinstance(node.func, ast.Attribute) and node.func.attr == "relative_to":
             self.guarded.update(self._guard_tokens(node))
+        self._record_mutation(node)
         self._record_sink(node)
         self._follow_call(node)
+
+    def _record_mutation(self, node: ast.Call) -> None:
+        """`queue.append(path)` puts tool input inside `queue`; taint the receiver.
+
+        Without this the value was dropped at the call and a later `queue[0]`
+        reaching a filesystem call produced a clean audit.
+        """
+
+        if not isinstance(node.func, ast.Attribute):
+            return
+        if node.func.attr not in CONTAINER_MUTATORS:
+            return
+        receiver = node.func.value
+        if not isinstance(receiver, ast.Name):
+            return
+        contributed = [self._value(argument) for argument in node.args]
+        contributed.extend(self._value(keyword.value) for keyword in node.keywords)
+        value = self._derived(node, [self._value(receiver), *contributed])
+        if value.sources:
+            self.bindings[receiver.id] = value
 
     def visit_Assign(self, node: ast.Assign) -> None:
         self.visit(node.value)
@@ -2428,6 +2562,51 @@ class _PathFlowVisitor(ast.NodeVisitor):
     def visit_TryStar(self, node: ast.TryStar) -> None:
         self._visit_try(node.body, node.handlers, node.orelse, node.finalbody)
 
+    @staticmethod
+    def _capture_names(pattern: ast.AST) -> set[str]:
+        """Capture names bound by a match pattern."""
+
+        names: set[str] = set()
+        for child in ast.walk(pattern):
+            if isinstance(child, ast.MatchAs) and child.name:
+                names.add(child.name)
+            elif isinstance(child, ast.MatchStar) and child.name:
+                names.add(child.name)
+            elif isinstance(child, ast.MatchMapping) and child.rest:
+                names.add(child.rest)
+        return names
+
+    def visit_Match(self, node: ast.Match) -> None:
+        # `match path: case str() as target:` binds target to the subject. Without
+        # this the capture was never bound and the taint vanished, letting an
+        # unguarded sink report `complete` with no findings before 0.2.3.
+        self.visit(node.subject)
+        subject = self._derived(node, [self._value(node.subject)])
+        before = self._state()
+        states = []
+        for case in node.cases:
+            self._restore(before)
+            for name in self._capture_names(case.pattern):
+                if subject.sources:
+                    self.bindings[name] = subject
+                else:
+                    self.bindings.pop(name, None)
+            if case.guard is not None:
+                self.visit(case.guard)
+            for statement in case.body:
+                self.visit(statement)
+            if not self._terminates(case.body):
+                states.append(self._state())
+        if not states:
+            self._restore(before)
+            return
+        merged = states[0]
+        for state in states[1:]:
+            self._restore(merged)
+            self._merge_states(merged, state)
+            merged = self._state()
+        self._restore(merged)
+
     def _visit_comprehension(
         self,
         generators: list[ast.comprehension],
@@ -2456,8 +2635,12 @@ class _PathFlowVisitor(ast.NodeVisitor):
         self._visit_comprehension(node.generators, [node.key, node.value])
 
     def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
-        if node.generators:
-            self.visit(node.generators[0].iter)
+        # A generator expression is a comprehension. Visiting only the first
+        # iterable, as releases before 0.2.3 did, made every call inside the
+        # element expression invisible: `"".join(subprocess.check_output(cmd,
+        # shell=True) for _ in ...)` reported `Side effects: 0`, `Observed: none`,
+        # `complete`, exit 0 - an affirmative denial of a capability the tool has.
+        self._visit_comprehension(node.generators, [node.elt])
 
 
 def _path_scope_result(
@@ -2533,7 +2716,7 @@ def path_lineage_unproven(
         tool,
         {parameter.name for parameter in tool.parameters},
     )
-    return [sink.evidence for sink in result.unproven_sinks]
+    return [sink.evidence for sink in result.unproven_sinks] + result.escapes
 
 
 def path_sink_parameters(project: ParsedProject, tool: ToolDefinition) -> set[str]:

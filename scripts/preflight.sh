@@ -18,3 +18,13 @@ PYTHONPYCACHEPREFIX="${temporary_output}/pycache" python3 -m compileall -q src t
 python3 -m ruff check .
 python3 -m mypy
 python3 -m build --no-isolation --outdir "${temporary_output}"
+
+# Behavioural validation against the built wheel in a throwaway environment. The
+# unit suite and the fixes were written from the same mental model, so it cannot
+# be the last gate; this exercises the CLI boundary users consume.
+wheel="$(ls "${temporary_output}"/mcp_scopecheck-*.whl)"
+python3 -m venv "${temporary_output}/venv"
+"${temporary_output}/venv/bin/python" -m pip install --quiet --disable-pip-version-check "${wheel}"
+python3 scripts/validate_release.py "${temporary_output}/venv/bin/mcp-scopecheck"
+
+"${repository_root}/scripts/check_action_pin.sh"

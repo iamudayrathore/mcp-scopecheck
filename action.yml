@@ -30,7 +30,7 @@ inputs:
       Exact mcp-scopecheck version to install. Pin this deliberately; the default
       tracks the release this action shipped with.
     required: false
-    default: "0.2.2"
+    default: "0.2.3"
   package:
     description: >-
       Alternative pip requirement to install instead of the pinned PyPI release,
@@ -76,11 +76,15 @@ runs:
         SCOPECHECK_VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
+        # `--` stops option parsing. Without it a package value beginning with a
+        # dash is consumed by pip as an option (for example an --index-url
+        # override), which matters when a workflow author interpolates untrusted
+        # data into this input.
         if [ -n "${SCOPECHECK_PACKAGE}" ]; then
-          python -m pip install --disable-pip-version-check --no-deps \
+          python -m pip install --disable-pip-version-check --no-deps -- \
             "${SCOPECHECK_PACKAGE}"
         else
-          python -m pip install --disable-pip-version-check --no-deps \
+          python -m pip install --disable-pip-version-check --no-deps -- \
             "mcp-scopecheck==${SCOPECHECK_VERSION}"
         fi
 

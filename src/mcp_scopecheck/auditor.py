@@ -236,8 +236,7 @@ def audit(target: str | Path) -> AuditReport:
                 AnalysisNotification(
                     "MSC103-LINEAGE-UNPROVEN",
                     "filesystem scope was not inferred for tool "
-                    f"{tool.name!r}: tool input reaches {evidence.symbol} through "
-                    "an expression form outside the supported model",
+                    f"{tool.name!r}: {evidence.detail} ({evidence.symbol})",
                     evidence.source_file,
                     evidence.line_number,
                 )
