@@ -1,6 +1,6 @@
 # Limitations
 
-MCP ScopeCheck v0.2.0 performs bounded Python AST analysis over a local file or
+MCP ScopeCheck v0.2.2 performs bounded Python AST analysis over a local file or
 directory. It never imports or executes audited source, starts an MCP server,
 installs target dependencies, or inspects installed packages.
 
@@ -45,8 +45,30 @@ and `MSC108`. `MSC103` requires supported argument lineage and recognized guard
 state across the path. Suppression is per sink and applies only when unresolved
 work could own that sink's guard: wrapper/decorator indirection, or an unresolved
 call that actually receives the path value. Unrelated unresolved calls elsewhere
-in the tool no longer suppress the rule, and incompleteness is still reported. `MSC105` remains same-function. v0.2.0 does not implement
+in the tool no longer suppress the rule, and incompleteness is still reported. `MSC105` remains same-function. v0.2.2 does not implement
 cross-module environment-to-network taint or general interprocedural data flow.
+
+Sink coverage is an allowlist for **every** capability, not only network.
+Filesystem, process, and dynamic-code sinks are modeled sets of APIs, and an API
+outside a set is not reported at all - the tool will state `Observed: none` for a
+capability it does not model. v0.2.2 covers `subprocess.*`,
+`asyncio.create_subprocess_*`, `os.system`/`popen`/`startfile`, `os.exec*`,
+`os.spawn*`, `os.posix_spawn*`, `os.fork`/`forkpty`, `pty.spawn`/`fork`/`openpty`,
+and `multiprocessing.Process` for process execution, and `eval`, `exec`,
+`compile`, `runpy.run_path`/`run_module`, `code.interact`/`InteractiveInterpreter`,
+and `types.FunctionType` for dynamic code. Execution reached through `ctypes`, a
+C extension, or any other unmodeled route is not detected. Releases before 0.2.2
+modeled only `subprocess.*`, `asyncio.create_subprocess_*`, `os.system`,
+`os.popen`, `eval`, and `exec`.
+
+Path taint propagates through ordinary construction and through control-flow
+joins, and fails closed when it cannot. An expression form outside the modeled
+set does not clear the value: the sink is recorded as `MSC103-LINEAGE-UNPROVEN`,
+the audit becomes partial, and the exit status is `2`. `MSC103` is withheld in
+that case because the rule asserts a path is *unguarded*, which cannot be claimed
+about lineage that was not followed. Releases before 0.2.2 dropped such taint
+silently and could report `complete` with no findings and exit `0` for a tool
+performing unrestricted caller-controlled file access.
 
 `MSC001` matches deterministic wording families, and those families differ in
 precision. Unambiguous directive families are Critical. The `credential-handling

@@ -30,7 +30,7 @@ inputs:
       Exact mcp-scopecheck version to install. Pin this deliberately; the default
       tracks the release this action shipped with.
     required: false
-    default: "0.2.1"
+    default: "0.2.2"
   python-version:
     description: Python version used to run the scanner.
     required: false
