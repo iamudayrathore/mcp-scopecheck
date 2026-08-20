@@ -30,10 +30,28 @@ time. A rule that cannot decide a property reliably must not claim to.
   be a path must be used with a pathlib-exclusive method before a capability is
   asserted, so an in-memory cache calling `ENTRIES[key].touch()` is no longer
   reported as a filesystem write, and no longer produces a `readOnlyHint` conflict.
-- `scripts/validate_release.py` drops the containment groups and grows its
-  capability-visibility and benign coverage: 108 checks, including the routes that
-  previously denied a capability and the in-memory shapes that previously invented
-  one.
+- `scripts/validate_release.py` drops the containment groups and grows to 164
+  checks. Its anti-stub assertion, orphaned by the removal, is restored and applied
+  to every group: a case must show that the fixture was actually analyzed - tool
+  discovered, parameters recovered, contract digest produced - not merely that a
+  verdict was printed. Three integrity checks require the snapshot digest to be
+  well-formed, to differ between different contracts, and to be stable across runs.
+  A regex fake that never parses scores 71/164; a stub that only exits scores
+  56/164.
+- Fixed a capability regression introduced while narrowing speculative path
+  receivers: a directly constructed `Path(...)` was classified as merely inferred,
+  suppressing the capability for every sink method outside a seven-name set.
+  `Path(name).unlink()` reported `Observed: none` under a `complete` audit and a
+  `readOnlyHint=true` claim while `p = Path(name); p.unlink()` reported the write -
+  identical code judged differently on line count. Only a container element, or a
+  call that merely received a path, is speculative now. Walrus-bound paths are also
+  recognised.
+- Removed ten dead module constants left by the withdrawal, including a comment
+  block describing the containment proof model that shipped in the wheel.
+- `docs/limitations.md` no longer guarantees that `Observed: none` is never produced
+  for a tool that touches the filesystem; nothing in the code provides that after
+  the fail-closed lineage path was removed. `docs/architecture.md` no longer carries
+  an orphaned fragment asserting that guard lineage remains supported.
 - No change to the exit-code contract, the no-execution invariant, the resource
   limits, the SARIF schema, or the snapshot digest payload.
 

@@ -120,6 +120,30 @@ class SpeculativeReceiverTests(unittest.TestCase):
                 self.assertEqual(_capabilities(report), set())
                 self.assertEqual(_rules(report), set())
 
+    def test_ambiguous_methods_on_a_proven_path_are_filesystem(self) -> None:
+        """A constructed Path is proven, so every sink method on it counts.
+
+        Treating any call receiver as speculative made `Path(name).unlink()` report
+        no capability while `p = Path(name); p.unlink()` reported the write - the
+        same code, judged differently on line count.
+        """
+
+        for body, capability in (
+            ("    Path(name).unlink()", Capability.FILESYSTEM_WRITE),
+            ("    Path(name).touch()", Capability.FILESYSTEM_WRITE),
+            ("    Path(name).rename('x')", Capability.FILESYSTEM_WRITE),
+            ("    Path(name).open().read()", Capability.FILESYSTEM_READ),
+            ("    _resolve(name).touch()", Capability.FILESYSTEM_WRITE),
+            ("    (p := Path(name)).touch()", Capability.FILESYSTEM_WRITE),
+        ):
+            with self.subTest(body=body.strip()):
+                self.assertIn(capability, _capabilities(_audit(body)))
+
+    def test_one_line_and_two_line_spellings_agree(self) -> None:
+        single = _capabilities(_audit("    Path(name).unlink()"))
+        split = _capabilities(_audit("    p = Path(name)\n    p.unlink()"))
+        self.assertEqual(single, split)
+
     def test_pathlib_exclusive_methods_on_a_container_element_still_count(self) -> None:
         for method in ("read_text", "iterdir", "read_bytes"):
             with self.subTest(method=method):

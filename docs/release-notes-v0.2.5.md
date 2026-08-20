@@ -50,8 +50,8 @@ the trace and make it — the [5-S pre-install checklist](review-checklist.md) c
 what to look for. **Do not read a clean audit as evidence that filesystem access is
 bounded.** ScopeCheck does not evaluate that, and now says so instead of guessing.
 
-Seven rules remain, each of which has come through five adversarial audits without a
-defect: `MSC001`, `MSC101`, `MSC102`, `MSC105`, `MSC106`, `MSC107`, `MSC108`.
+Seven rules remain: `MSC001`, `MSC101`, `MSC102`, `MSC105`, `MSC106`, `MSC107`,
+`MSC108`.
 
 ## Two capability defects fixed on the way out
 
@@ -88,12 +88,25 @@ names on caches, ORM rows and connection pools.
 
 ## Results
 
-`scripts/validate_release.py` runs **108 checks against an installed wheel**, all
-passing. The containment groups are gone; capability-visibility and benign coverage
-grew to include every route that previously denied a capability and every in-memory
-shape that previously invented one.
+`scripts/validate_release.py` runs **164 checks against an installed wheel**, all
+passing. Read that as *nothing regressed in the shapes enumerated*, not as evidence
+of correctness — six audits have now found defects in builds whose gate was green.
 
-Unit suite: 168 tests.
+What the number is worth depends on whether the gate can be satisfied without
+analyzing anything, so that is measured directly:
+
+| Build under test | Score |
+| --- | ---: |
+| 0.2.5 | **164 pass, 0 fail** |
+| A regex fake that never calls `ast.parse` | 71 pass, **93 fail** |
+| A stub that only prints and exits `2` | 56 pass, **108 fail** |
+
+Three integrity checks anchor the rest: the snapshot digest must be well-formed
+sha256, must differ between two different contracts, and must be identical across
+runs of the same one. A build that does not analyze can print any fixed line; it
+cannot produce digests that track the contract.
+
+Unit suite: 170 tests.
 
 ## Compatibility
 

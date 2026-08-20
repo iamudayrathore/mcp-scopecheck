@@ -199,9 +199,7 @@ methods remain network capabilities but are not guessed to be writes.
 Unambiguous cross-module capability evidence may feed `MSC101`, `MSC102`,
 `MSC106`, `MSC107`, and `MSC108`.
 
-the direct argument mapping and recognized guard lineage remain supported; an
-unresolved lineage suppresses that inference and produces a completeness
-notification. `MSC105` remains same-function and does not carry taint across a
+`MSC105` remains same-function and does not carry taint across a
 call boundary. Capability evidence retains a shortest source path from the
 registered tool to each sink.
 

@@ -88,27 +88,29 @@ class Validator:
         return directory
 
     @staticmethod
-    def reported_for_the_right_reason(code: int, out: str) -> tuple[bool, str]:
-        """Whether a dangerous case was reported, and reported *because of itself*.
+    def proves_real_analysis(out: str) -> tuple[bool, str]:
+        """Whether the output could only come from actually analyzing the fixture.
 
-        Asserting only a non-zero exit is not enough. A build that stopped analyzing
-        entirely - or that failed to parse the fixture at all - exits non-zero and
-        would satisfy such a check. This gate previously passed 90 of its 129 cases
-        against a stub that did nothing but `exit 2`, which is precisely the blind
-        spot it exists to prevent: asserting the outcome wanted rather than the
-        reason for it.
+        A check that asserts a verdict is satisfied by any build that emits that
+        verdict, including one that never parses a file. An earlier version of this
+        gate scored 90/129 against a three-line stub, and after the containment
+        groups were removed a fifty-line regex fake that never called `ast.parse`
+        scored a clean sweep - while the build under test carried a live false
+        negative on `Path(name).unlink()`.
 
-        So require that the tool was actually discovered and analyzed, and that the
-        verdict names the filesystem-scope rule or its incompleteness notification.
+        So require artefacts a pattern-matcher cannot fabricate for an arbitrary
+        fixture: the tool discovered by name from its decorator, the parameter list
+        recovered from the signature, and a snapshot digest over the extracted
+        contract.
         """
 
-        if "1 MCP tool(s) discovered" not in out:
-            return False, "no tool was discovered; the fixture was not analyzed"
-        if code == 0:
-            return False, "reported clean"
-        named = "MSC103" in out or "MSC103-LINEAGE-UNPROVEN" in out
-        if not named:
-            return False, f"non-zero exit without naming a filesystem-scope reason\n{out[-300:]}"
+        for required, detail in (
+            ("MCP tool(s) discovered", "no tool was discovered; the fixture was not analyzed"),
+            ("Snapshot:     sha256:", "no contract digest; nothing was extracted"),
+            ("Parameters:", "no parameter list; the signature was not read"),
+        ):
+            if required not in out:
+                return False, detail
         return True, ""
 
     @staticmethod
@@ -124,6 +126,16 @@ class Validator:
 # which is worse than reporting nothing.
 CAPABILITY_VISIBILITY = {
     "path_built_inside_helper": "    _resolve(name).write_text('x')",
+    # Ambiguous sink methods on a *proven* path. Both the gate and the unit tests
+    # previously exercised ambiguous methods only on a container element and proven
+    # paths only with pathlib-exclusive methods, so the one question that separates
+    # the fix from the bug was never asked.
+    "constructed_path_unlink": "    Path(name).unlink()",
+    "constructed_path_touch": "    Path(name).touch()",
+    "constructed_path_rename": "    Path(name).rename('x')",
+    "constructed_path_open": "    Path(name).open().read()",
+    "helper_path_touch": "    _resolve(name).touch()",
+    "walrus_path_touch": "    (p := Path(name)).touch()",
     "nested_helper": (
         "    def _inner(value):\n        return Path(value)\n"
         "    _inner(name).write_text('x')"
@@ -306,11 +318,8 @@ def main() -> int:
             observed or code == 2,
             f"capability denied under a complete audit (exit {code})\n{out[-300:]}",
         )
-        validator.check(
-            f"capability/{label}/analyzed",
-            "1 MCP tool(s) discovered" in out,
-            "fixture was not analyzed",
-        )
+        analysed, detail = validator.proves_real_analysis(out)
+        validator.check(f"capability/{label}/analyzed", analysed, detail)
 
 
     for label, (body, rule) in EXECUTION.items():
@@ -325,12 +334,16 @@ def main() -> int:
             "Observed:    none" not in out,
             "reported Observed: none for a capability it has",
         )
+        analysed, detail = validator.proves_real_analysis(out)
+        validator.check(f"execution/{label}/analyzed", analysed, detail)
 
     for label, body in BENIGN.items():
         code, out = validator.audit(validator.server(body))
         validator.check(
             f"benign/{label}", code == 0, f"exit {code}: false positive\n{out[-400:]}"
         )
+        analysed, detail = validator.proves_real_analysis(out)
+        validator.check(f"benign/{label}/analyzed", analysed, detail)
 
     canary = Path(tempfile.mkdtemp()) / "CANARY"
     for label, template in SIDE_EFFECT_VECTORS.items():
@@ -407,6 +420,43 @@ def main() -> int:
         validator.check("sarif/failure_is_json", True)
     except ValueError as error:
         validator.check("sarif/failure_is_json", False, str(error))
+
+    # A build that does not analyze can print any fixed line, including a plausible
+    # snapshot header. It cannot produce digests that track the contract: the same
+    # tool must hash identically across runs, and a different contract must hash
+    # differently. This is the one assertion a pattern-matcher cannot satisfy for
+    # arbitrary input, so it anchors every other check in this file.
+    digests = []
+    for body in (
+        "    Path(name).read_text()",
+        "    Path(name).write_text('x')\n    import subprocess\n    subprocess.run(name)",
+    ):
+        _, out = validator.audit(validator.server(body))
+        line = next(
+            (item for item in out.splitlines() if "Snapshot:" in item and "sha256:" in item),
+            "",
+        )
+        digests.append(line.split("sha256:", 1)[-1].strip())
+    validator.check(
+        "integrity/digest_is_wellformed",
+        all(len(digest) == 64 and set(digest) <= set("0123456789abcdef") for digest in digests),
+        f"snapshot digests are not sha256 hex: {digests}",
+    )
+    validator.check(
+        "integrity/digest_tracks_contract",
+        len(set(digests)) == 2,
+        "two different tools produced the same contract digest; "
+        "the fixture was not analyzed",
+    )
+    repeat_first = validator.audit(validator.server("    Path(name).read_text()"))[1]
+    repeated = next(
+        (i for i in repeat_first.splitlines() if "Snapshot:" in i), ""
+    ).split("sha256:", 1)[-1].strip()
+    validator.check(
+        "integrity/digest_is_deterministic",
+        repeated == digests[0],
+        "the same contract produced two different digests",
+    )
 
     print("=" * 62)
     print(f"PASS {validator.passed}   FAIL {len(validator.failures)}")

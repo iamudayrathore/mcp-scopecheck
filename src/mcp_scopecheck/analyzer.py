@@ -198,17 +198,6 @@ CODE_EXECUTION_CALLS = {
     "runpy.run_path",
     "types.FunctionType",
 }
-PATH_PARAMETER_NAMES = {
-    "dir",
-    "directory",
-    "file",
-    "file_path",
-    "filename",
-    "folder",
-    "path",
-    "root",
-}
-PATH_PARAMETER_SUFFIXES = ("_dir", "_directory", "_file", "_folder", "_path")
 
 POISONING_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
@@ -1409,6 +1398,8 @@ class _ExecutionVisitor(ast.NodeVisitor):
             return self._is_path_value(value.left, resolved_imports)
         if isinstance(value, ast.Attribute) and value.attr == "parent":
             return self._is_path_value(value.value, resolved_imports)
+        if isinstance(value, ast.NamedExpr):
+            return self._is_path_value(value.value, resolved_imports)
         if isinstance(value, ast.Subscript):
             # `paths["docs"].read_text()`. Only pathlib-exclusive method names
             # qualify, checked by the caller: `touch`, `rename`, `open` and `chmod`
@@ -1504,11 +1495,36 @@ class _ExecutionVisitor(ast.NodeVisitor):
                 return True
         return False
 
-    @staticmethod
-    def _is_speculative_path(value: ast.AST) -> bool:
-        """Whether the receiver is only inferred to be a path, not proven one."""
+    def _is_speculative_path(self, value: ast.AST) -> bool:
+        """Whether the receiver is only inferred to be a path, not proven one.
 
-        return isinstance(value, (ast.Subscript, ast.Call))
+        `Path(name)` is a proven path, not a guess. Treating every `ast.Call` as
+        speculative made a literal constructor less trusted than a dict subscript
+        and suppressed the capability for every sink method outside the
+        pathlib-exclusive set: `Path(name).unlink()` reported `Observed: none`
+        under a `complete` audit while `p = Path(name); p.unlink()` reported the
+        write. Identical code, different verdict decided by whether the author used
+        one line or two - the same property that led to withdrawing MSC103.
+
+        Only two things are genuinely unproven: an element taken out of a
+        container, and a call that merely *received* a path and might return one.
+        """
+
+        if isinstance(value, ast.Subscript):
+            return True
+        if not isinstance(value, ast.Call):
+            return False
+        imports = self._imports_for_value(value)
+        if _qualified_name(value.func, imports) in {"pathlib.Path", "os.fspath"}:
+            return False
+        if (
+            isinstance(value.func, ast.Attribute)
+            and value.func.attr in PATH_RETURNING_METHODS
+            and self._is_path_value(value.func.value, imports)
+        ):
+            return False
+        # A resolvable local callee returning a path expression is proven too.
+        return not self._returns_path(value)
 
     def _path_iterator(self, value: ast.AST) -> bool:
         return (
@@ -1957,112 +1973,10 @@ def analyze_capabilities(
 
 
 
-# Methods that return a string derived from their receiver. A path that survives
-# `.strip("/")`, `.replace("..", "")`, or `.format(...)` is still the same
-# caller-controlled path, and the first two are the broken sanitizers a scanner
-# most needs to report rather than silently clear.
-STRING_DERIVING_METHODS = {
-    "capitalize",
-    "casefold",
-    "decode",
-    "encode",
-    "expandtabs",
-    "format",
-    "format_map",
-    "join",
-    "ljust",
-    "lower",
-    "lstrip",
-    "removeprefix",
-    "removesuffix",
-    "replace",
-    "rjust",
-    "rstrip",
-    "strip",
-    "swapcase",
-    "title",
-    "upper",
-    "zfill",
-}
-# Module-level functions that return a path-like string from their arguments.
-STRING_DERIVING_CALLS = {
-    "os.path.expandvars",
-    "os.sep.join",
-    "posixpath.join",
-    "ntpath.join",
-    "urllib.parse.unquote",
-    "urllib.parse.unquote_plus",
-}
 
-# Methods that place their argument inside the receiver. The receiver then holds
-# tool input, so it must inherit the taint.
-CONTAINER_MUTATORS = {
-    "add",
-    "append",
-    "extend",
-    "insert",
-    "setdefault",
-    "update",
-}
 
-# Containment is a proven fact about a value, not a mark that spreads. These are the
-# only derivations that carry the proof forward, because they denote the same file
-# beneath the same root. Everything else - adding a component, expanding a home
-# directory, rewriting the string - can leave the root, so the proof is dropped and
-# the derived value is unguarded again. Releases before 0.2.4 inherited the guard
-# through any derivation whose inputs were guarded, so a path built by escaping out
-# of a guarded value (`t / ".." / ".." / "etc" / "passwd"`) was reported clean.
-CONTAINMENT_PRESERVING_METHODS = frozenset(
-    {
-        "absolute",
-        "resolve",
-        # A child of a contained directory is contained, and swapping the suffix of
-        # a contained file keeps it in the same directory. `with_name` is excluded:
-        # it takes a caller-supplied name that can contain separators. Without
-        # these, the ordinary shapes MSC103's own remediation text recommends -
-        # validate a directory then iterate it, validate a file then write beside it
-        # - were reported as unconstrained.
-        "glob",
-        "iterdir",
-        "rglob",
-        "with_suffix",
-    }
-)
-CONTAINMENT_PRESERVING_CALLS = frozenset(
-    {
-        "os.fspath",
-        "os.path.abspath",
-        "os.path.normpath",
-        "os.path.realpath",
-        "pathlib.Path",
-        "str",
-    }
-)
 
-# Of the preserving methods, these take an argument that cannot leave the root: a
-# glob pattern is matched beneath the receiver, and a suffix replaces the extension.
-CONTAINMENT_PRESERVING_WITH_ARGUMENTS = frozenset(
-    {"glob", "rglob", "with_suffix"}
-)
 
-PATH_TRANSFORM_CALLS = {
-    "os.fspath",
-    "os.path.abspath",
-    "os.path.expanduser",
-    "os.path.join",
-    "os.path.normpath",
-    "os.path.realpath",
-    "pathlib.Path",
-    "str",
-}
-TWO_PATH_CALLS = {
-    "os.rename",
-    "os.replace",
-    "shutil.copy",
-    "shutil.copy2",
-    "shutil.copyfile",
-    "shutil.move",
-}
 
 
 
