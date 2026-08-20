@@ -33,6 +33,9 @@
 
 ## 0.2.2 - 2026-08-20
 
+> **Publication note:** v0.2.2 was tagged in GitHub but was not published to
+> PyPI. Its changes first became installable from PyPI in v0.2.3.
+
 - Withdrew `MSC103` (filesystem scope) and `MSC104` (dangerous filesystem default),
   along with the containment machinery behind them and their SARIF catalogue
   entries. Both decided whether caller-controlled filesystem access was constrained,
