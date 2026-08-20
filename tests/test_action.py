@@ -37,6 +37,13 @@ class ActionPolicyTests(unittest.TestCase):
         self.assertIn("--no-deps", self.text)
         self.assertIn('"mcp-scopecheck==${SCOPECHECK_VERSION}"', self.text)
 
+    def test_package_override_defaults_to_empty_so_pypi_stays_the_source(self) -> None:
+        """The override exists for testing a checkout, not as the normal path."""
+
+        self.assertIn("package:", self.text)
+        package_block = self.text[self.text.index("  package:") :]
+        self.assertIn('default: ""', package_block[: package_block.index("python-version:")])
+
     def test_target_controlled_inputs_are_passed_through_the_environment(self) -> None:
         """Target paths and thresholds must never be interpolated into a shell line."""
 

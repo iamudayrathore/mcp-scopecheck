@@ -127,8 +127,61 @@ NETWORK_CLIENT_CONSTRUCTORS = {
     ),
     "urllib3.HTTPConnectionPool": frozenset({"request", "urlopen"}),
 }
-PROCESS_PREFIXES = ("asyncio.create_subprocess_", "subprocess.")
-PROCESS_CALLS = {"os.popen", "os.system"}
+# Process-launching sinks. This is an allowlist, and it is documented as one:
+# anything absent is not reported, so additions belong here rather than in a rule.
+# `os.exec*`, `os.spawn*`, `pty.*`, and `multiprocessing.Process` all launch a
+# program just as plainly as `subprocess.run`, and reporting `Observed: none` for
+# them is worse than reporting nothing at all - it affirmatively denies a
+# capability the tool has.
+PROCESS_PREFIXES = (
+    "asyncio.create_subprocess_",
+    "os.execl",
+    "os.execle",
+    "os.execlp",
+    "os.execlpe",
+    "os.execv",
+    "os.execve",
+    "os.execvp",
+    "os.execvpe",
+    "os.posix_spawn",
+    "os.spawnl",
+    "os.spawnle",
+    "os.spawnlp",
+    "os.spawnlpe",
+    "os.spawnv",
+    "os.spawnve",
+    "os.spawnvp",
+    "os.spawnvpe",
+    "subprocess.",
+)
+PROCESS_CALLS = {
+    "multiprocessing.Process",
+    "multiprocessing.pool.Pool",
+    "os.fork",
+    "os.forkpty",
+    "os.popen",
+    "os.startfile",
+    "os.system",
+    "pty.fork",
+    "pty.openpty",
+    "pty.spawn",
+}
+# Dynamic code execution. `runpy` executes a file or module as __main__ and
+# `types.FunctionType(compile(...))` reconstitutes a callable from source, both of
+# which are code execution by any reading of the term.
+CODE_EXECUTION_CALLS = {
+    "builtins.compile",
+    "builtins.eval",
+    "builtins.exec",
+    "code.InteractiveInterpreter",
+    "code.interact",
+    "compile",
+    "eval",
+    "exec",
+    "runpy.run_module",
+    "runpy.run_path",
+    "types.FunctionType",
+}
 PATH_PARAMETER_NAMES = {
     "dir",
     "directory",
@@ -1104,7 +1157,7 @@ def _call_capability(
             return Capability.NETWORK_EGRESS if method in methods else None
     if name in PROCESS_CALLS or name.startswith(PROCESS_PREFIXES):
         return Capability.PROCESS_EXECUTION
-    if name in {"eval", "exec", "builtins.eval", "builtins.exec"}:
+    if name in CODE_EXECUTION_CALLS:
         return Capability.CODE_EXECUTION
     return None
 
@@ -1745,6 +1798,11 @@ def analyze_capabilities(
 class _PathValue:
     sources: frozenset[str] = frozenset()
     tokens: frozenset[int] = frozenset()
+    # False when the value carries tool-parameter data through an expression form
+    # the analyzer does not model. Such a value still taints, so the sink is not
+    # lost, but MSC103 must not assert an unguarded finding on lineage it cannot
+    # explain; the sink is reported as incomplete instead.
+    proven: bool = True
 
 
 @dataclass
@@ -1757,6 +1815,7 @@ class _PathFlowState:
 class _PathSinkFlow:
     sources: frozenset[str]
     evidence: Evidence
+    proven: bool = True
 
 
 @dataclass
@@ -1764,6 +1823,51 @@ class _PathScopeResult:
     sinks: list[_PathSinkFlow] = field(default_factory=list)
     expanded_sources: set[str] = field(default_factory=set)
 
+    @property
+    def proven_sinks(self) -> list[_PathSinkFlow]:
+        return [sink for sink in self.sinks if sink.proven]
+
+    @property
+    def unproven_sinks(self) -> list[_PathSinkFlow]:
+        return [sink for sink in self.sinks if not sink.proven]
+
+
+# Methods that return a string derived from their receiver. A path that survives
+# `.strip("/")`, `.replace("..", "")`, or `.format(...)` is still the same
+# caller-controlled path, and the first two are the broken sanitizers a scanner
+# most needs to report rather than silently clear.
+STRING_DERIVING_METHODS = {
+    "capitalize",
+    "casefold",
+    "decode",
+    "encode",
+    "expandtabs",
+    "format",
+    "format_map",
+    "join",
+    "ljust",
+    "lower",
+    "lstrip",
+    "removeprefix",
+    "removesuffix",
+    "replace",
+    "rjust",
+    "rstrip",
+    "strip",
+    "swapcase",
+    "title",
+    "upper",
+    "zfill",
+}
+# Module-level functions that return a path-like string from their arguments.
+STRING_DERIVING_CALLS = {
+    "os.path.expandvars",
+    "os.sep.join",
+    "posixpath.join",
+    "ntpath.join",
+    "urllib.parse.unquote",
+    "urllib.parse.unquote_plus",
+}
 
 PATH_TRANSFORM_CALLS = {
     "os.fspath",
@@ -1825,11 +1929,33 @@ class _PathFlowVisitor(ast.NodeVisitor):
         self.guarded = set(state.guarded)
 
     def _merge_states(self, first: _PathFlowState, second: _PathFlowState) -> None:
-        self.bindings = {
-            name: value
-            for name, value in first.bindings.items()
-            if second.bindings.get(name) == value
-        }
+        """Join two control-flow paths.
+
+        Taint unions and guards intersect - the conservative direction for each.
+        Intersecting the bindings, as releases before 0.2.2 did, dropped a value
+        that was tainted on only one path, so `try: p = name / except: p = DEFAULT`
+        or a `for` loop that may not execute silently untainted the value and the
+        sink went unreported. A value tainted on any reachable path is tainted at
+        the join; a guard holds only if every joined path established it.
+        """
+
+        merged: dict[str, _PathValue] = {}
+        for name in set(first.bindings) | set(second.bindings):
+            left = first.bindings.get(name, _PathValue())
+            right = second.bindings.get(name, _PathValue())
+            if left == right:
+                if left.sources:
+                    merged[name] = left
+                continue
+            sources = left.sources | right.sources
+            if not sources:
+                continue
+            merged[name] = _PathValue(
+                sources,
+                left.tokens | right.tokens,
+                proven=left.proven and right.proven,
+            )
+        self.bindings = merged
         self.guarded = first.guarded & second.guarded
 
     def _derived(self, node: ast.AST, values: Iterable[_PathValue]) -> _PathValue:
@@ -1841,7 +1967,38 @@ class _PathFlowVisitor(ast.NodeVisitor):
         original_tokens = {item for value in items for item in value.tokens}
         if original_tokens and original_tokens <= self.guarded:
             self.guarded.add(token)
-        return _PathValue(sources, frozenset({token}))
+        return _PathValue(
+            sources,
+            frozenset({token}),
+            proven=all(value.proven for value in items),
+        )
+
+    def _tracked_sources(self, node: ast.AST) -> frozenset[str]:
+        """Sources reachable from any tracked name appearing under `node`."""
+
+        if not self.bindings:
+            return frozenset()
+        sources: set[str] = set()
+        for child in ast.walk(node):
+            if isinstance(child, ast.Name):
+                sources.update(self.bindings.get(child.id, _PathValue()).sources)
+        return frozenset(sources)
+
+    def _unmodeled(self, node: ast.AST) -> _PathValue:
+        """Fail closed on an expression form the analyzer does not model.
+
+        Returning an empty value here would silently drop the taint and let a
+        caller-controlled path reach a filesystem call with no finding, no
+        notification, and a `complete` audit - the exact failure this scanner
+        exists to prevent. Instead the value keeps tainting, but is marked
+        unproven so MSC103 reports incompleteness rather than asserting a guard
+        state it cannot explain.
+        """
+
+        sources = self._tracked_sources(node)
+        if not sources:
+            return _PathValue()
+        return _PathValue(sources, frozenset({id(node)}), proven=False)
 
     def _value(self, node: ast.AST) -> _PathValue:
         if isinstance(node, ast.Name):
@@ -1857,8 +2014,32 @@ class _PathFlowVisitor(ast.NodeVisitor):
             return self._value(node.value)
         if isinstance(node, ast.Attribute) and node.attr == "parent":
             return self._derived(node, [self._value(node.value)])
-        if not isinstance(node, ast.Call):
+        # Percent formatting is ordinary path construction: "%s/%s" % (root, name).
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+            return self._derived(node, [self._value(node.left), self._value(node.right)])
+        # Indexing, slicing, and conditional selection all preserve the value.
+        if isinstance(node, ast.Subscript):
+            return self._derived(node, [self._value(node.value), self._value(node.slice)])
+        if isinstance(node, ast.IfExp):
+            return self._derived(node, [self._value(node.body), self._value(node.orelse)])
+        if isinstance(node, ast.Starred):
+            return self._derived(node, [self._value(node.value)])
+        if isinstance(node, ast.Await):
+            return self._derived(node, [self._value(node.value)])
+        # A container is path-like when any element is: "/".join([root, name]).
+        if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+            return self._derived(node, [self._value(item) for item in node.elts])
+        if isinstance(node, ast.Dict):
+            return self._derived(
+                node,
+                [self._value(value) for value in node.values if value is not None],
+            )
+        if isinstance(node, ast.NamedExpr):
+            return self._derived(node, [self._value(node.value)])
+        if isinstance(node, ast.Constant):
             return _PathValue()
+        if not isinstance(node, ast.Call):
+            return self._unmodeled(node)
         imports = self.execution.imports_for(node)
         name = _qualified_name(node.func, imports)
         if name in {"os.fspath", "str"}:
@@ -1866,11 +2047,15 @@ class _PathFlowVisitor(ast.NodeVisitor):
             return _PathValue(
                 frozenset(source for value in values for source in value.sources),
                 frozenset(token for value in values for token in value.tokens),
+                proven=all(value.proven for value in values),
             )
         if name in PATH_TRANSFORM_CALLS:
             return self._derived(node, [self._value(argument) for argument in node.args])
+        if name in STRING_DERIVING_CALLS:
+            return self._derived(node, [self._value(argument) for argument in node.args])
         if isinstance(node.func, ast.Attribute) and node.func.attr in {
             *PATH_RETURNING_METHODS,
+            *STRING_DERIVING_METHODS,
             "glob",
             "iterdir",
             "relative_to",
@@ -1878,9 +2063,13 @@ class _PathFlowVisitor(ast.NodeVisitor):
         }:
             return self._derived(
                 node,
-                [self._value(node.func.value), *[self._value(arg) for arg in node.args]],
+                [
+                    self._value(node.func.value),
+                    *[self._value(argument) for argument in node.args],
+                    *[self._value(keyword.value) for keyword in node.keywords],
+                ],
             )
-        return _PathValue()
+        return self._unmodeled(node)
 
     def _assign(self, targets: Iterable[ast.AST], value: _PathValue) -> None:
         for target in targets:
@@ -1957,7 +2146,11 @@ class _PathFlowVisitor(ast.NodeVisitor):
                 source for value in values for source in value.sources
             )
             tokens = frozenset(token for value in values for token in value.tokens)
-            return _PathValue(sources, tokens)
+            return _PathValue(
+                sources,
+                tokens,
+                proven=all(value.proven for value in values),
+            )
 
         imports = self.execution.imports_for(call)
         name = _qualified_name(call.func, imports)
@@ -1968,7 +2161,11 @@ class _PathFlowVisitor(ast.NodeVisitor):
                 values.append(self._value(keyword.value))
         sources = frozenset(source for value in values for source in value.sources)
         tokens = frozenset(token for value in values for token in value.tokens)
-        return _PathValue(sources, tokens)
+        return _PathValue(
+            sources,
+            tokens,
+            proven=all(value.proven for value in values),
+        )
 
     def _record_sink(self, call: ast.Call) -> None:
         path_call = self.execution.path_filesystem_calls.get(id(call))
@@ -1985,6 +2182,12 @@ class _PathFlowVisitor(ast.NodeVisitor):
         value = self._sink_value(call)
         if not value.sources or value.tokens <= self.guarded:
             return
+        detail = (
+            "path-like tool input reaches this filesystem operation"
+            if value.proven
+            else "tool input reaches this filesystem operation through an "
+            "expression form the analyzer does not model"
+        )
         self.result.sinks.append(
             _PathSinkFlow(
                 value.sources,
@@ -1992,8 +2195,9 @@ class _PathFlowVisitor(ast.NodeVisitor):
                     self.record.source_file,
                     _line_number(call),
                     symbol or _display_name(call.func, imports),
-                    "path-like tool input reaches this filesystem operation",
+                    detail,
                 ),
+                proven=value.proven,
             )
         )
 
@@ -2067,9 +2271,14 @@ class _PathFlowVisitor(ast.NodeVisitor):
         self._assign([node.target], self._value(node.value))
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        # `root += name` is path construction. Discarding the value here, as
+        # releases before 0.2.2 did, dropped the taint entirely.
         self.visit(node.target)
         self.visit(node.value)
-        self._assign([node.target], _PathValue())
+        self._assign(
+            [node.target],
+            self._derived(node, [self._value(node.target), self._value(node.value)]),
+        )
 
     def visit_Delete(self, node: ast.Delete) -> None:
         self._assign(node.targets, _PathValue())
@@ -2306,6 +2515,25 @@ def _guard_may_be_unresolved(
         if sources & _expression_identifiers(edge.call_expression):
             return True
     return False
+
+
+def path_lineage_unproven(
+    project: ParsedProject,
+    tool: ToolDefinition,
+) -> list[Evidence]:
+    """Filesystem sinks reached through expression forms the analyzer does not model.
+
+    These make an audit incomplete rather than clean. Before 0.2.2 the taint was
+    dropped silently at these points, so a caller-controlled path reaching an
+    unguarded filesystem call could produce `complete` with no findings and exit 0.
+    """
+
+    result = _path_scope_result(
+        project,
+        tool,
+        {parameter.name for parameter in tool.parameters},
+    )
+    return [sink.evidence for sink in result.unproven_sinks]
 
 
 def path_sink_parameters(project: ParsedProject, tool: ToolDefinition) -> set[str]:
@@ -2647,9 +2875,13 @@ def analyze_contract(
     # could actually own its guard. Sinks whose lineage is fully proven are still
     # reported even if the tool contains unrelated unresolved calls.
     unresolved_list = list(unresolved_edges)
+    # Only sinks whose lineage the analyzer can explain produce a finding. A sink
+    # reached through an unmodeled expression form still exists and is surfaced,
+    # but through the completeness ledger, because MSC103 asserts an *unguarded*
+    # path and that claim cannot be made about lineage that was not followed.
     reportable_sinks = [
         sink
-        for sink in path_scope.sinks
+        for sink in path_scope.proven_sinks
         if not _guard_may_be_unresolved(sink.sources, unresolved_list)
     ]
     if reportable_sinks:
