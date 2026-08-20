@@ -1,0 +1,107 @@
+name: MCP ScopeCheck
+description: >-
+  Statically audit a Python MCP server's declared contract against the behavior
+  reachable from its source, without importing or executing the target.
+author: Uday Rathore
+
+branding:
+  icon: shield
+  color: purple
+
+inputs:
+  target:
+    description: Local Python file or source directory to audit.
+    required: true
+  fail-on:
+    description: >-
+      Severity threshold for exit 1: low, medium, high, or critical.
+    required: false
+    default: low
+  format:
+    description: "Report format written to the output file: text or sarif."
+    required: false
+    default: sarif
+  output:
+    description: File the report is written to.
+    required: false
+    default: scopecheck.sarif
+  version:
+    description: >-
+      Exact mcp-scopecheck version to install. Pin this deliberately; the default
+      tracks the release this action shipped with.
+    required: false
+    default: "0.2.1"
+  python-version:
+    description: Python version used to run the scanner.
+    required: false
+    default: "3.13"
+  fail-build:
+    description: >-
+      Fail the step when the audit exits nonzero. Set to "false" to keep the
+      workflow green and branch on the exit-code output instead. An audit that is
+      partial or failed exits 2, which is not a clean result.
+    required: false
+    default: "true"
+
+outputs:
+  exit-code:
+    description: >-
+      ScopeCheck exit status. 0 = complete with no finding at or above the
+      threshold, 1 = complete with findings, 2 = analysis partial or failed.
+    value: ${{ steps.audit.outputs.exit-code }}
+  report:
+    description: Path to the written report file.
+    value: ${{ steps.audit.outputs.report }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python for ScopeCheck
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install ScopeCheck
+      shell: bash
+      env:
+        SCOPECHECK_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        python -m pip install --disable-pip-version-check --no-deps \
+          "mcp-scopecheck==${SCOPECHECK_VERSION}"
+
+    - name: Audit the target
+      id: audit
+      shell: bash
+      env:
+        SCOPECHECK_FAIL_ON: ${{ inputs.fail-on }}
+        SCOPECHECK_FORMAT: ${{ inputs.format }}
+        SCOPECHECK_OUTPUT: ${{ inputs.output }}
+        SCOPECHECK_TARGET: ${{ inputs.target }}
+      run: |
+        # GitHub runs composite bash steps as `bash -e`, so errexit must be
+        # cleared explicitly around the audit; otherwise the shell aborts on a
+        # nonzero audit before the exit status can be captured and reported.
+        set +e
+        mcp-scopecheck audit "${SCOPECHECK_TARGET}" \
+          --fail-on "${SCOPECHECK_FAIL_ON}" \
+          --format "${SCOPECHECK_FORMAT}" > "${SCOPECHECK_OUTPUT}"
+        scopecheck_exit=$?
+        set -e
+        printf 'exit-code=%s\n' "${scopecheck_exit}" >> "${GITHUB_OUTPUT}"
+        printf 'report=%s\n' "${SCOPECHECK_OUTPUT}" >> "${GITHUB_OUTPUT}"
+        cat "${SCOPECHECK_OUTPUT}"
+
+    - name: Enforce the audit result
+      if: ${{ inputs.fail-build == 'true' && steps.audit.outputs.exit-code != '0' }}
+      shell: bash
+      env:
+        SCOPECHECK_EXIT: ${{ steps.audit.outputs.exit-code }}
+      run: |
+        set -euo pipefail
+        if [ "${SCOPECHECK_EXIT}" = "2" ]; then
+          echo "::error::ScopeCheck analysis was partial or failed (exit 2). This is not a clean result; review the completeness ledger in the report."
+        else
+          echo "::error::ScopeCheck reported findings at or above the configured threshold (exit ${SCOPECHECK_EXIT})."
+        fi
+        exit "${SCOPECHECK_EXIT}"

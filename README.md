@@ -64,6 +64,41 @@ Exit codes are stable for local and CI use:
 
 Use `--fail-on high` (or `low`, `medium`, or `critical`) to set the exit-`1` threshold.
 
+## GitHub Action
+
+Audit a server on every push. Pin the action by commit SHA, as you would any
+third-party action:
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  scopecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: iamudayrathore/mcp-scopecheck@main   # replace with a pinned SHA
+        with:
+          target: path/to/python/server
+          fail-on: high
+      - uses: github/codeql-action/upload-sarif@<pinned-sha>
+        if: always()
+        with:
+          sarif_file: scopecheck.sarif
+```
+
+The action writes SARIF by default and fails the step on a nonzero audit,
+including exit `2`, because a partial or failed analysis is not a clean result.
+Set `fail-build: false` and branch on the `exit-code` output to handle the exit
+codes yourself. The `version` input pins the scanner independently of the action
+ref; the default tracks the release the action shipped with.
+
+SARIF upload is intentionally not bundled, so the action does not pull a second
+third-party action into your supply chain or require `security-events` write
+where you do not want it.
+
 ## Why this exists
 
 An MCP tool description and its annotations are claims. They do not enforce a permission boundary. A tool named `search_project_docs` can still contain code that reads `/`, accesses environment values, starts a process, or sends data over the network.

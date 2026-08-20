@@ -15,6 +15,10 @@ appear as non-finding entries under
 
 ## GitHub code scanning
 
+For most repositories the composite action described in the README is simpler than
+the explicit steps below. This section documents the underlying steps for workflows
+that need to control each one.
+
 The following push-only example retains the ScopeCheck exit status, uploads SARIF even
 for exits `1` and `2`, and then fails the job with the original status. The official
 upload action is pinned to the immutable commit for `v4.36.0`; review and update action
@@ -35,17 +39,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
 
       - name: Install ScopeCheck without dependencies
-        run: python -m pip install --no-deps mcp-scopecheck==0.2.0
+        run: python -m pip install --no-deps mcp-scopecheck==0.2.1
 
       - name: Audit and retain exit status
         id: scopecheck
