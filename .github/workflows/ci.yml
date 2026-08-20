@@ -56,6 +56,10 @@ jobs:
         with:
           target: examples/hardened_docs_server
           output: hardened.sarif
+          # Exercise this checkout, not the last published release. Without this
+          # the job would test whatever is already on PyPI and could never cover
+          # the change under review.
+          package: "."
 
       - name: Audit the unsafe fixture without failing the build
         id: unsafe
@@ -64,6 +68,7 @@ jobs:
           target: examples/unsafe_docs_server
           output: unsafe.sarif
           fail-build: "false"
+          package: "."
 
       - name: Assert the unsafe fixture reported findings and valid SARIF
         shell: bash
