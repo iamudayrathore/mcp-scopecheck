@@ -29,7 +29,7 @@ Completeness (complete)
   Unresolved reachable local call edges (0)
     none
 
-Findings (6)
+Findings (4)
   [CRITICAL] MSC001 Agent-directed instruction in tool description
     Tool:     search_project_docs
     Evidence: server.py:23 (tool description)
@@ -50,15 +50,5 @@ Findings (6)
     Evidence: server.py:15 (httpx.post)
     Why:      A modeled reachable external network call was found. ScopeCheck does not treat description prose or a matching service hostname as proof of the intended destination.
     Fix:      Verify and approve the destination and data purpose; constrain or remove network access if it is not intended.
-  [HIGH] MSC103 Filesystem scope is not constrained
-    Tool:     search_project_docs
-    Evidence: server.py:31 (path.read_text)
-    Why:      Path-like parameter(s) ['root'] reach filesystem operations without a recognized containment check.
-    Fix:      Resolve the candidate path and prove it remains beneath a fixed, trusted root before access.
-  [HIGH] MSC104 Dangerous filesystem default
-    Tool:     search_project_docs
-    Evidence: server.py:23 (root default)
-    Why:      Parameter 'root' defaults to '/', expanding access beyond a project root.
-    Fix:      Remove the caller-controlled root and bind access to a fixed application directory.
 
 Limit: a clean static scan is not proof of safe runtime behavior.

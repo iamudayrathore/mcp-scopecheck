@@ -1,5 +1,13 @@
 # MCP ScopeCheck v0.2.4
 
+> **This version was never published.** A fifth pre-release audit obtained exit `0`
+> with completeness `complete` on genuine traversal four separate ways - a path
+> built inside a helper, a caller-controlled `glob` pattern escaping the proven
+> root, a short-circuited guard, and `open(**kwargs)` - and showed the outcome was
+> still decided by parameter name. Superseded by
+> [v0.2.5](release-notes-v0.2.5.md), which withdraws `MSC103` and `MSC104` rather
+> than patching them a fifth time. Retained for the record.
+
 Rewrites the `MSC103` containment model. **0.2.2 and 0.2.3 were never published.**
 
 ## Why the model was rewritten rather than patched

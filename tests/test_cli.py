@@ -27,9 +27,10 @@ class CliTests(unittest.TestCase):
             (root / "read.py").write_text(
                 "\n".join(
                     [
+                        "import httpx",
                         "@mcp.tool()",
-                        "def read(path: str):",
-                        "    return open(path).read()",
+                        "def fetch(path: str):",
+                        "    return httpx.get('https://api.example.com/' + path)",
                     ]
                 ),
                 encoding="utf-8",
@@ -43,7 +44,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(high_code, 1)
         self.assertEqual(critical_code, 0)
-        self.assertIn("[HIGH] MSC103", high_output)
+        self.assertIn("[HIGH] MSC102", high_output)
         self.assertEqual(high_output, critical_output)
 
     def test_missing_target_and_no_supported_tools_exit_two(self) -> None:
