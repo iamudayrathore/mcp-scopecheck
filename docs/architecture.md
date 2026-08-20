@@ -233,7 +233,7 @@ outside the recognized set (`pycurl`, `smtplib`, `ftplib`, `websockets`, DNS
 resolvers) is likewise unmodeled. Proven instance methods require a known
 supported constructor binding that remains live at that statement.
 
-`MSC103` and `MSC104` are withdrawn as of 0.2.5; see `docs/limitations.md`. The
+`MSC103` and `MSC104` are withdrawn as of 0.2.2; see `docs/limitations.md`. The
 filesystem capability and its evidence path are still produced by the call-graph
 analysis described above. No containment judgement is made.
 

@@ -1,6 +1,6 @@
 # Limitations
 
-MCP ScopeCheck v0.2.5 performs bounded Python AST analysis over a local file or
+MCP ScopeCheck v0.2.2 performs bounded Python AST analysis over a local file or
 directory. It never imports or executes audited source, starts an MCP server,
 installs target dependencies, or inspects installed packages.
 
@@ -41,13 +41,13 @@ statically recognizable:
 ## Rule boundaries
 
 Cross-module capability facts can inform `MSC101`, `MSC102`, `MSC106`, `MSC107`,
-and `MSC108`. `MSC105` remains same-function. v0.2.5 does not implement
+and `MSC108`. `MSC105` remains same-function. v0.2.2 does not implement
 cross-module environment-to-network taint or general interprocedural data flow.
 
 Sink coverage is an allowlist for **every** capability, not only network.
 Filesystem, process, and dynamic-code sinks are modeled sets of APIs, and an API
 outside a set is not reported at all - the tool will state `Observed: none` for a
-capability it does not model. v0.2.5 covers `subprocess.*`,
+capability it does not model. v0.2.2 covers `subprocess.*`,
 `asyncio.create_subprocess_*`, `os.system`/`popen`/`startfile`, `os.exec*`,
 `os.spawn*`, `os.posix_spawn*`, `os.fork`/`forkpty`, `pty.spawn`/`fork`/`openpty`,
 and `multiprocessing.Process` for process execution, and `eval`, `exec`,
@@ -58,7 +58,7 @@ modeled only `subprocess.*`, `asyncio.create_subprocess_*`, `os.system`,
 `os.popen`, `eval`, and `exec`.
 
 **Filesystem containment is not analyzed.** `MSC103` and `MSC104` were withdrawn
-in 0.2.5. They decided whether caller-controlled filesystem access was constrained,
+in 0.2.2. They decided whether caller-controlled filesystem access was constrained,
 and did so incorrectly across four consecutive release candidates in alternating
 directions: too permissive, then too strict, then permissive again through new
 mechanisms, and finally still gated on whether a parameter was named `path` rather

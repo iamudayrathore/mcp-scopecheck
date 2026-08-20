@@ -1451,7 +1451,7 @@ class _ExecutionVisitor(ast.NodeVisitor):
 
         `def _resolve(name): return ROOT / name` then `_resolve(name).write_text(...)`
         is the ordinary way to write a path helper, and it constructs the path inside
-        the callee, so there is no path argument to notice. Before 0.2.5 the sink was
+        the callee, so there is no path argument to notice. Before 0.2.2 the sink was
         never registered and the tool reported `Observed: none` under a `complete`
         audit - an arbitrary caller-controlled write, denied outright.
 
@@ -1772,7 +1772,7 @@ class _ExecutionVisitor(ast.NodeVisitor):
 
     def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
         # A generator expression is a comprehension. Visiting only the first
-        # iterable, as releases before 0.2.3 did, made every call inside the
+        # iterable, as releases before 0.2.2 did, made every call inside the
         # element expression invisible: `"".join(subprocess.check_output(cmd,
         # shell=True) for _ in ...)` reported `Side effects: 0`, `Observed: none`,
         # `complete`, exit 0 - an affirmative denial of a capability the tool has.
@@ -2192,7 +2192,7 @@ def analyze_contract(
     # traversal through `filepath`, `target`, or `name` is the same defect as one
     # through `path`.
     # MSC103 (filesystem scope) and MSC104 (dangerous filesystem default) are
-    # withdrawn in 0.2.5. Both decided whether caller-controlled path access was
+    # withdrawn in 0.2.2. Both decided whether caller-controlled path access was
     # reported, and both got it wrong across four consecutive candidates in
     # alternating directions - and in the last one, still by parameter name, which
     # is the mechanism the project's own advisory is written about. A rule that

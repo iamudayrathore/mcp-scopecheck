@@ -1,116 +1,104 @@
 # MCP ScopeCheck v0.2.2
 
-> **This version was never published.** A pre-release audit found that it did not
-> close the failure class it was written to close, and two of the claims below are
-> wrong: "None returns a clean result" and "No new false positives were found".
-> Generator expressions hid every capability inside them, and storing tool input in
-> a subscript, an attribute, a `match` capture, or a module global dropped the taint
-> silently. The count "All 15 process and dynamic-code primitives" is also wrong -
-> the same paragraph names 16. Superseded by
-> [v0.2.3](release-notes-v0.2.3.md), which closes those gaps and pins every claim to
-> a check in the repository. Retained for the record.
+Withdraws `MSC103` and `MSC104`, and fixes a crash on crafted source encodings.
 
-Second correctness patch for filesystem-scope analysis, plus process and
-dynamic-code sink coverage. **Upgrading is required for anyone relying on a clean
-0.2.1 result.**
+**If you are on 0.2.1, upgrading changes what this tool claims.** Read the first
+section before you rely on a clean result from either version.
 
-## Why this release exists
+## What 0.2.1 got wrong
 
-v0.2.1 fixed which tool parameters were *seeded* into the filesystem dataflow. It
-did not fix how taint *propagated*. An independent pre-launch audit found that the
-user-visible failure mode was still present: one ordinary string operation
-laundered a caller-controlled path and produced a clean audit.
-
-```python
-@mcp.tool(annotations={"readOnlyHint": True})
-def read_doc(path: str) -> str:
-    """Read a bundled documentation file from the fixed docs root."""
-    target = path.strip("/")
-    return open(target).read()
-```
+`MSC103` and `MSC104` decided whether a tool's caller-controlled filesystem access
+was *constrained* — whether a supplied path could escape an intended root. They did
+so by matching the parameter's **name** against a fixed list. A traversal through a
+parameter named `filepath`, `target`, `title` or `name` was not analyzed at all, and
+the audit reported:
 
 ```console
-$ mcp-scopecheck audit ./server        # 0.2.1
+$ mcp-scopecheck audit ./server
   Completeness: complete
 Findings (0)
 $ echo $?
 0
 ```
 
-Twenty-four of twenty-six ordinary path-construction idioms behaved this way,
-including `.replace("..", "")` and `.strip("/")` - the *broken* sanitizers a
-scanner most needs to report.
+for a tool performing unrestricted caller-controlled file reads and writes. Exit `0`
+with completeness `complete` is this tool's strongest statement, and it was wrong.
 
-`docs/release-notes-v0.2.1.md` said "A scanner whose central promise is that it
-reports what it cannot prove must not go silent." It still went silent. That is
-the defect this release closes, and the earlier claim of closure was wrong.
+Four successive attempts to fix the rule failed in alternating directions — too
+permissive, then reporting correct containment code as unsafe, then permissive again
+through new mechanisms. Each fix was right for the case that prompted it; the class
+survived every time. The underlying model could not express *"this value is provably
+beneath this root"* across Python's control flow.
 
-## What changed
+**So the rules are withdrawn rather than patched.** A rule that cannot decide a
+property reliably should not claim to.
 
-**Taint propagates through ordinary path construction.** `%` formatting,
-`.format`, `.join`, `os.sep.join`, `posixpath.join`, the string-deriving method
-family (`.strip`, `.lstrip`, `.replace`, `.removeprefix`, `.encode`/`.decode` and
-peers), `urllib.parse.unquote`, subscripting, slicing, conditional expressions,
-walrus bindings, container literals, starred arguments, and tuple unpacking.
+## What that means for you
 
-**Control-flow joins union taint and intersect guards.** Before 0.2.2 the join
-*intersected* bindings, so `try: p = name / except: p = DEFAULT`, a `for` loop
-that might not execute, and `root += name` all silently untainted the value. A
-value tainted on any reachable branch is now tainted after the join; a guard
-survives only when every joined branch established it.
-
-**Unfollowed lineage fails closed.** An expression form outside the model no
-longer clears the value. The sink is recorded, the audit becomes `partial`, the
-exit status is `2`, and the completeness ledger names the location:
+ScopeCheck still reports **that** a tool reaches a filesystem operation, and the call
+path to it:
 
 ```
-Notification MSC103-LINEAGE-UNPROVEN at server.py:9: filesystem scope was not
-inferred for tool 'read_doc': tool input reaches open through an expression form
-outside the supported model
+    Observed:    filesystem_write
+    Evidence:    filesystem_write: write_note (server.py:12) -> _resolve (server.py:6)
+                 -> path.write_text (server.py:7)
 ```
 
-`MSC103` is deliberately withheld there rather than reported. The rule asserts a
-path is *unguarded*, and that assertion cannot be made about lineage the analyzer
-did not follow. Incompleteness is the honest answer; silence was not.
+It no longer reports whether that path is contained. **A clean audit is not evidence
+that a tool's filesystem access is bounded** — read the evidence trace and judge it
+yourself. The [5-S pre-install checklist](review-checklist.md) covers what to look
+for.
 
-**Process and dynamic-code sink coverage.** `MSC106` and `MSC107` are both
-Critical, but their sink sets were four entries each. A tool declaring
-`readOnlyHint=true` and calling `pty.spawn(["/bin/sh", "-c", cmd])` reported
-`Side effects: 0`, `Observed: none`, `complete`, exit `0` - not merely a missing
-rule, but an affirmative denial of a capability the tool has.
+Seven rules remain: `MSC001`, `MSC101`, `MSC102`, `MSC105`, `MSC106`, `MSC107`,
+`MSC108`.
 
-Now modeled: `os.exec*`, `os.spawn*`, `os.posix_spawn*`, `os.fork`, `os.forkpty`,
-`os.startfile`, `pty.spawn`, `pty.fork`, `pty.openpty`, `multiprocessing.Process`,
-and for dynamic code `compile`, `runpy.run_path`, `runpy.run_module`,
-`code.interact`, `code.InteractiveInterpreter`, `types.FunctionType`.
+Expect **fewer findings** than 0.2.1 on the same source. That is not approval of your
+code; it is the tool declining to give an opinion it could not support.
 
-**Sink coverage is now documented as an allowlist for every capability**, not just
-network. README and `docs/limitations.md` state plainly that an unmodeled sink is
-not reported and that `Observed: none` means "none that are modeled".
+## Also fixed
 
-## Results
+**A crash on crafted source encodings.** A declared codec that exists but is not a
+text encoding (`rot13`, `base64`, `hex`, `bz2`, `zlib`, `quopri`, `uu`) raised an
+unhandled exception, producing exit `1` with no output — which the exit contract
+defines as "complete, findings at threshold". A workflow branching on the exit code
+read a crash as a scan result, and SARIF output was empty despite the documented
+promise that stdout is JSON on every nonzero exit. Present since 0.1.2 and live in
+0.2.1.
 
-All 26 path-construction forms from the audit matrix: 22 now report `MSC103` and
-exit `1`; the remaining 4 fail closed to `partial` and exit `2`. **None returns a
-clean result.** All 15 process and dynamic-code primitives report their capability
-and the corresponding Critical rule.
+**Capability reporting no longer depends on how code is spelled.** A path built
+inside a local helper, or reached through a chain of calls, is now observed rather
+than silently dropped; and semantically identical code no longer produces different
+verdicts depending on whether it was written on one line or two.
 
-No new false positives were found: recognized guards still clear a constructed
-path, string operations on data that never reaches a filesystem sink stay clean,
-and a derived value written to a fixed path stays clean.
+**A path stored in a container and retrieved by subscript is not tracked** —
+`paths["docs"].read_text()` reports no capability. This is a deliberate, bounded
+blind spot, documented in [limitations](limitations.md) and pinned by tests, chosen
+over a heuristic that invented filesystem capabilities on ordinary in-memory code.
+
+## Verification
+
+`scripts/validate_release.py` runs 164 behavioural checks against an installed wheel
+— path routes, execution sinks, benign servers, the no-execution invariant, hostile
+input, output forgery, exit codes and SARIF. `scripts/preflight.sh` builds a wheel,
+installs it in a throwaway environment and runs them, so it gates the release rather
+than depending on anyone remembering.
+
+Read a green run as *nothing regressed in the shapes enumerated*, not as evidence of
+correctness. The gate is checked against builds that do not analyze at all: a
+pattern-matcher that hashes source text scores 130/164, a print-and-exit stub 55/164.
+Those describe the two fakes that were built, not a bound.
+
+Unit suite: 171 tests.
 
 ## Compatibility
 
-No change to the exit-code contract, the no-execution invariant, the resource
-limits, the SARIF schema, or the snapshot digest payload.
+No change to the exit-code contract, the no-execution invariant, the resource limits,
+the SARIF schema, or the snapshot digest payload. `MSC103` and `MSC104` no longer
+appear in the SARIF rule catalogue.
 
-Expect **materially more** findings and materially more `partial` results on
-unchanged source. A tool that previously exited `0` may now exit `1` because the
-finding was always true, or `2` because the analysis was never complete. Both are
-corrections, not regressions.
+## Known limitations
 
-## Advisory
-
-`GHSA-jx85-6p69-j94f` describes the pre-0.2.1 naming-based false negative. Its
-patched version must read **0.2.2**, not 0.2.1: the class of failure it describes
-was not fully closed until this release.
+See [limitations](limitations.md) in full. In brief: containment is not analyzed;
+`Observed: none` means "none that were modeled"; sink coverage is an allowlist for
+every capability; lambda bodies and module-level instance dispatch are not followed;
+`MSC001` is deterministic pattern matching and has not been benchmarked.
