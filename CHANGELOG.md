@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.2.2 - 2026-08-19
+
+Second correctness patch for filesystem-scope analysis, plus process and
+dynamic-code sink coverage. Required for anyone relying on a clean 0.2.1 result.
+
+- Fixed path-taint propagation. 0.2.1 fixed which parameters were seeded into the
+  filesystem dataflow but not how taint propagated, so one ordinary string
+  operation still laundered a caller-controlled path into a clean audit:
+  `open(path.strip("/"))` produced completeness `complete`, no findings, and exit
+  `0`. Taint now propagates through `%` formatting, `.format`, `.join`,
+  `os.sep.join`, `posixpath.join`, the string-deriving method family
+  (`.strip`/`.lstrip`/`.rstrip`/`.replace`/`.removeprefix`/`.removesuffix`/
+  `.encode`/`.decode` and peers), `urllib.parse.unquote`, subscripting, slicing,
+  conditional expressions, walrus bindings, container literals, starred arguments,
+  and tuple unpacking.
+- Fixed control-flow joins. The join previously intersected bindings, so
+  `try:`/`except:` assignment, a `for` loop that may not execute, and augmented
+  assignment silently untainted a value. Taint now unions across joined branches
+  and guards intersect: a value tainted on any reachable branch is tainted after
+  the join, and a guard survives only when every joined branch established it.
+- Unfollowed path lineage now fails closed. An expression form outside the model
+  no longer clears the value; the sink is reported as `MSC103-LINEAGE-UNPROVEN`,
+  the audit becomes `partial`, and the exit status is `2`. `MSC103` itself is
+  withheld there because the rule asserts a path is unguarded, which cannot be
+  claimed about lineage that was not followed.
+- Expanded `MSC106` process sinks to `os.exec*`, `os.spawn*`, `os.posix_spawn*`,
+  `os.fork`, `os.forkpty`, `os.startfile`, `pty.spawn`, `pty.fork`, `pty.openpty`,
+  and `multiprocessing.Process`. A tool declaring `readOnlyHint=true` and calling
+  `pty.spawn` previously reported `Observed: none` and exit `0`, affirmatively
+  denying a capability it had.
+- Expanded `MSC107` dynamic-code sinks to `compile`, `runpy.run_path`,
+  `runpy.run_module`, `code.interact`, `code.InteractiveInterpreter`, and
+  `types.FunctionType`.
+- Documented that sink coverage is an allowlist for every capability, not only
+  network. `Observed: none` means none that are modeled.
+- No change to the exit-code contract, the no-execution invariant, the resource
+  limits, the SARIF schema, or the snapshot digest payload. Expect materially more
+  findings and more `partial` results on unchanged source; both are corrections.
+
+
 ## 0.2.1 - 2026-08-19
 
 Correctness patch for filesystem-scope analysis. Upgrading is recommended for

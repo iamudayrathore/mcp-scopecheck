@@ -136,11 +136,11 @@ side effect in a fixture and proves it does not execute during an audit.
 | `MSC001` | High/Critical | Deterministic indicator families find agent-directed wording. Unambiguous directives (override, concealment, covert transfer, hidden-token markers, privileged-role impersonation) are Critical; ambiguous credential-handling and cross-call sequencing wording is High |
 | `MSC101` | High/Critical | `readOnlyHint=true` conflicts with justified state-changing behavior; process and dynamic code conflicts are Critical |
 | `MSC102` | High | Mandatory external-egress review for modeled network sinks: every modeled external and dynamic/computed destination is flagged, since neither prose nor a matching service hostname proves the destination; only local/loopback/private destinations are exempt. Specialized subtypes report explicit-denial contradictions and destination mismatches |
-| `MSC103` | High | A tool parameter reaches a filesystem operation in a path position without a recognized guard on that value; participation is decided by dataflow, not by parameter naming |
+| `MSC103` | High | A tool parameter reaches a filesystem operation in a path position without a recognized guard on that value. Participation is decided by dataflow, not parameter naming, and propagates through ordinary path construction. Lineage the analyzer cannot follow makes the audit partial instead of producing a finding |
 | `MSC104` | High | A path-like or filesystem-reaching parameter defaults to the POSIX root or to an exact home root that code actually expands |
 | `MSC105` | Critical | Environment-derived data reaches a supported module or proven client-instance network sink in the same reachable function |
-| `MSC106` | Critical | Process or shell execution is reachable |
-| `MSC107` | Critical | `eval` or `exec` is reachable |
+| `MSC106` | Critical | Process or shell execution is reachable, for the modeled process-launching APIs (allowlist; see limitations) |
+| `MSC107` | Critical | Dynamic code execution is reachable, for the modeled APIs: `eval`, `exec`, `compile`, `runpy`, `code`, and `types.FunctionType` (allowlist; see limitations) |
 | `MSC108` | High | `openWorldHint=false` conflicts with reachable external network interaction |
 
 Observed capabilities are reported separately from findings. Filesystem reads are not automatically vulnerabilities; the contract comparison determines whether the behavior is inconsistent or insufficiently constrained.
@@ -179,6 +179,11 @@ v0.2 intentionally supports:
   values
 - Qualified builtin, `pathlib`, `os`, and `shutil` filesystem operations with
   static open-mode/flag handling
+- Modeled process-launching APIs: `subprocess.*`, `asyncio.create_subprocess_*`,
+  `os.system`/`popen`/`startfile`, `os.exec*`, `os.spawn*`, `os.posix_spawn*`,
+  `os.fork`/`forkpty`, `pty.spawn`/`fork`/`openpty`, and `multiprocessing.Process`
+- Modeled dynamic-code APIs: `eval`, `exec`, `compile`, `runpy.run_path`/
+  `run_module`, `code.interact`/`InteractiveInterpreter`, and `types.FunctionType`
 
 It does **not** prove:
 
@@ -190,6 +195,9 @@ It does **not** prove:
 - `httpx.stream` or `aiohttp.request` context-manager factories, or egress via
   clients outside the recognized set (for example `pycurl`, `smtplib`, `ftplib`,
   `websockets`)
+- Process or dynamic-code execution through an API outside the modeled sets above.
+  Network, filesystem, process, and dynamic-code sink coverage are all allowlists;
+  an unmodeled sink is not reported, and no rule infers one
 - TypeScript/JavaScript behavior
 - Authorization correctness
 - Whether all observed data actually leaves the process, except the narrow same-function flow implemented by `MSC105`
@@ -214,10 +222,18 @@ and recall have not yet been measured against a large corpus of real MCP tool
 descriptions; the bundled corpus is a small regression fixture, not a benchmark.
 `MSC102` compares the statically resolved egress destination against the
 description and never lets prose suppress a finding; an unresolved destination is
-always flagged. `MSC103` seeds from every declared tool parameter and correlates simple path
-aliases and transformations with the guarded value; only path argument positions
-count, so a data argument beside a path is not treated as one. `.resolve()` alone
-is only normalization. A sink is withheld only when unresolved work could own its
+always flagged. `MSC103` seeds from every declared tool parameter and correlates path aliases and
+transformations with the guarded value; only path argument positions count, so a
+data argument beside a path is not treated as one. Taint propagates through
+ordinary path construction - concatenation, f-strings, `%`, `.format`, `.join`,
+`os.path.join`, `.strip`/`.replace`/`.removeprefix` and the rest of the string
+family, indexing, ternaries, tuple unpacking, augmented assignment, and
+control-flow joins. A value tainted on any reachable branch is tainted after the
+join; a guard holds only when every joined branch established it. Lineage running
+through an expression form outside that model does **not** silently clear: the
+sink is reported in the completeness ledger as `MSC103-LINEAGE-UNPROVEN`, the
+audit becomes partial, and the exit status is `2`. `.resolve()` alone is only
+normalization. A sink is withheld only when unresolved work could own its
 guard - wrapper/decorator indirection, or an unresolved call that receives the
 path value - so unrelated indirection elsewhere in the tool no longer hides a
 proven traversal. `MSC105` follows direct

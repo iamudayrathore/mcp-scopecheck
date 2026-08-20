@@ -30,7 +30,15 @@ inputs:
       Exact mcp-scopecheck version to install. Pin this deliberately; the default
       tracks the release this action shipped with.
     required: false
-    default: "0.2.1"
+    default: "0.2.2"
+  package:
+    description: >-
+      Alternative pip requirement to install instead of the pinned PyPI release,
+      for example "." to test a checkout before it is published. Leave empty in
+      production: the default installs the exact published version from PyPI,
+      and anything set here is installed in place of it.
+    required: false
+    default: ""
   python-version:
     description: Python version used to run the scanner.
     required: false
@@ -64,11 +72,17 @@ runs:
     - name: Install ScopeCheck
       shell: bash
       env:
+        SCOPECHECK_PACKAGE: ${{ inputs.package }}
         SCOPECHECK_VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
-        python -m pip install --disable-pip-version-check --no-deps \
-          "mcp-scopecheck==${SCOPECHECK_VERSION}"
+        if [ -n "${SCOPECHECK_PACKAGE}" ]; then
+          python -m pip install --disable-pip-version-check --no-deps \
+            "${SCOPECHECK_PACKAGE}"
+        else
+          python -m pip install --disable-pip-version-check --no-deps \
+            "mcp-scopecheck==${SCOPECHECK_VERSION}"
+        fi
 
     - name: Audit the target
       id: audit

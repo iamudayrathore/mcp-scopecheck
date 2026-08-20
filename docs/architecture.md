@@ -254,6 +254,19 @@ Calling a guard-like method on an unrelated value or merely normalizing with
 prove symlink safety, eliminate time-of-check/time-of-use races, or model dynamic
 dispatch and arbitrary validation helpers.
 
+Path values propagate through concatenation, `/`, f-strings, `%` formatting,
+`.format`, `.join`, the string-deriving method family (`.strip`, `.lstrip`,
+`.rstrip`, `.replace`, `.removeprefix`, `.removesuffix`, `.encode`, `.decode` and
+peers), `os.path.join`, `os.sep.join`, `posixpath.join`, `urllib.parse.unquote`,
+subscripting and slicing, conditional expressions, walrus bindings, container
+literals, starred arguments, augmented assignment, and tuple unpacking. At a
+control-flow join taint unions and guards intersect: a value tainted on any
+reachable branch is tainted afterwards, while a guard survives only when every
+joined branch established it. Any other expression form yields an *unproven*
+value - it still taints, so the sink is not lost, but `MSC103` is withheld and the
+sink is reported through the completeness ledger instead, because the rule asserts
+an unguarded path and that assertion cannot be made about unfollowed lineage.
+
 `MSC104` statically recognizes the POSIX root in string and supported
 `pathlib.Path` defaults. Exact `~` and `~/` defaults are treated as the home root
 only when the default or reachable code applies `Path.expanduser`,

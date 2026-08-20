@@ -13,6 +13,7 @@ from .analyzer import (
     analyze_capabilities,
     analyze_contract,
     analyze_reachability,
+    path_lineage_unproven,
     path_sink_parameters,
 )
 from .models import (
@@ -223,6 +224,25 @@ def audit(target: str | Path) -> AuditReport:
                 edge.line_number,
             )
         )
+    # A filesystem sink reached through an expression form the analyzer does not
+    # model must never render as a clean audit. Surfacing it here keeps the
+    # "report what cannot be proven" contract that the exit-code and completeness
+    # states depend on.
+    unproven_lineage = False
+    for tool in project.tools:
+        for evidence in path_lineage_unproven(project, tool):
+            unproven_lineage = True
+            notifications.append(
+                AnalysisNotification(
+                    "MSC103-LINEAGE-UNPROVEN",
+                    "filesystem scope was not inferred for tool "
+                    f"{tool.name!r}: tool input reaches {evidence.symbol} through "
+                    "an expression form outside the supported model",
+                    evidence.source_file,
+                    evidence.line_number,
+                )
+            )
+
     failed_diagnostic = any(
         diagnostic.status is AnalysisStatus.FAILED for diagnostic in project.diagnostics
     )
@@ -255,6 +275,7 @@ def audit(target: str | Path) -> AuditReport:
     elif (
         partial_diagnostic
         or unresolved_edges
+        or unproven_lineage
         or project.potential_registrations
     ):
         status = AnalysisStatus.PARTIAL
