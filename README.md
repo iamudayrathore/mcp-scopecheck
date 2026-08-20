@@ -82,6 +82,7 @@ jobs:
         with:
           target: path/to/python/server
           fail-on: high
+          version: "0.2.3"      # scanner version, independent of the pin above
       - uses: github/codeql-action/upload-sarif@<pinned-sha>
         if: always()
         with:
@@ -100,10 +101,13 @@ Release tags in this repository are additionally protected against updates and
 deletions, but pin the SHA regardless - do not extend trust to a tag in any
 repository whose protection you have not verified.
 
-The pinned commit determines which scanner version the action installs, because
-`action.yml` pins that version at the commit you reference. Pin a commit whose
-action installs the release you want, or set the `version` input explicitly. The
-commit above installs the current release.
+The pinned SHA selects the **action code**; the `version` input selects the
+**scanner**. Keep them separate. A commit's `action.yml` carries whatever scanner
+version was current when it was written, so relying on that default silently ties
+you to an older scanner every time you pin an older commit - which, for a security
+tool, means running one with known-missed detections. Setting `version` explicitly
+makes the scanner you run visible in your own workflow file and reviewable in your
+own diffs.
 
 The action writes SARIF by default and fails the step on a nonzero audit,
 including exit `2`, because a partial or failed analysis is not a clean result.

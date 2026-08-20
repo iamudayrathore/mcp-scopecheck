@@ -1,6 +1,59 @@
 # Changelog
 
-## 0.2.2 - 2026-08-19
+## 0.2.3 - 2026-08-19
+
+Closes the path-taint gaps that 0.2.2 left open, and the false positive 0.2.2
+introduced. 0.2.2 was never published.
+
+- Fixed generator expressions hiding every capability inside them. Both visitors
+  read only the first iterable, so a call in the element expression was never
+  observed: `"".join(subprocess.check_output(cmd, shell=True) for _ in ...)` on a
+  `readOnlyHint=true` tool reported `Side effects: 0`, `Observed: none`,
+  `complete`, exit `0` - an affirmative denial of a capability the tool has. Both
+  now use the same traversal already used for list, set, and dict comprehensions.
+- Fixed taint being dropped for assignment targets the analyzer does not track.
+  `_assigned_names` returned nothing for subscript and attribute targets, so
+  `_assign` bound nothing and the fail-closed path added in 0.2.2 never engaged.
+  Storing tool input in `d["k"]`, `obj.attr`, or a `global` now records an escape,
+  degrading the audit to `partial` with an `MSC103-LINEAGE-UNPROVEN` notification.
+- Added `match` statement capture binding, so `case str() as target:` carries the
+  subject's taint instead of losing it.
+- Added container mutation tracking: `queue.append(path)` taints `queue`, so a
+  later `queue[0]` reaching a filesystem call is reported.
+- Fixed a false positive introduced by 0.2.2's union-at-join. A branch that
+  rebinds a name to an untainted value no longer dissolves the guard established
+  by the branch that carries the taint, so the canonical containment idiom - guard
+  in `try`, fixed path in `except` - is clean again.
+- Fixed a longer-standing guard gap: `target.resolve().relative_to(ROOT)` now
+  establishes containment for `target` itself. Guarding only the normalized
+  temporary reported correct containment code as unconstrained, in 0.2.1 and
+  earlier as well.
+- `action.yml` passes `--` to `pip install`, so a package value beginning with a
+  dash cannot be parsed as a pip option.
+- The documented workflow now sets the scanner `version` explicitly rather than
+  inheriting it from the pinned commit's `action.yml`. A pinned SHA carries
+  whatever version was current when it was written, which silently tied users to
+  an older scanner. A unit test and `scripts/check_action_pin.sh`, now run in CI,
+  fail the build when the documented version drifts from the release.
+- Added `scripts/validate_release.py`: 107 behavioural checks against an installed
+  wheel covering path lineage, execution sinks, benign servers, the no-execution
+  invariant, hostile input, output forgery, exit codes, and SARIF.
+  `scripts/preflight.sh` builds a wheel, installs it in a throwaway environment,
+  and runs them.
+- No change to the exit-code contract, the no-execution invariant, the resource
+  limits, the SARIF schema, or the snapshot digest payload.
+
+
+## 0.2.2 - never published
+
+Superseded by 0.2.3 before release. A pre-release audit found it did not close the
+failure class it was written to close: generator expressions hid every capability
+inside them, and storing tool input in a subscript, an attribute, a `match`
+capture, or a module global dropped the taint silently, so a `readOnlyHint=true`
+tool doing unrestricted caller-controlled I/O still reported `complete`, no
+findings, exit `0`. Its claims "None returns a clean result" and "No new false
+positives were found" were both wrong. The changes below shipped as part of 0.2.3.
+
 
 Second correctness patch for filesystem-scope analysis, plus process and
 dynamic-code sink coverage. Required for anyone relying on a clean 0.2.1 result.
